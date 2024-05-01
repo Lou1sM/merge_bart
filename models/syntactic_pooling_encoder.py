@@ -1,14 +1,13 @@
 from transformers.models.bart.modeling_bart import BartEncoder
 from utils import strip_equals, equals_mod_whitespace
 from stanza.models.constituency.parse_tree import Tree
-from contractions import contractions
 import stanza
 import json
 import re
 import math
 import torch
 import torch.nn as nn
-from transformers.modeling_outputs import BaseModelOutput
+#from transformers.modeling_outputs import BaseModelOutput
 from transformers import BartConfig
 #from ...modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
@@ -35,8 +34,10 @@ class SyntacticPoolingEncoder(BartEncoder):
         hidden_states_nop = self.layernorm_embedding(hidden_states_nop)
         hidden_states_nop = nn.functional.dropout(hidden_states_nop, p=self.dropout, training=self.training)
 
+        n_to_drop_at_each_layer = 500
+
         for idx, encoder_layer in enumerate(self.layers):
-            running_span_sizes = [sum(t.root.span_size for t in trees[:i]) for i in range(len(trees)+1)]
+            running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
             if not ( running_span_sizes[-1] == len(hidden_states_nop) - 2): # -2 for bos and eos
                 breakpoint()
             if (contracting:=len(hidden_states_nop) > 1024):
@@ -50,40 +51,45 @@ class SyntacticPoolingEncoder(BartEncoder):
             else:
                 attention_mask = None
                 hidden_states_nop = hidden_states_nop.unsqueeze(0)
+                padding_needed = 0
             embed_pos = self.embed_positions(hidden_states_nop[:,:,-1])
             hidden_states = hidden_states_nop + embed_pos
             layer_outputs = encoder_layer(hidden_states, attention_mask=attention_mask, layer_head_mask=None, output_attentions=True)
             hidden_states_nop = layer_outputs[0] - embed_pos
-            hidden_states_nop = hidden_states_nop.flatten(0,1)[:-padding_needed]
             # output from HF is (bsz, n_heads, seqlen, seqlen), take sum over all heads and all query tokens except the final padding
             layer_attns = layer_outputs[1].transpose(0,1).flatten(1,2)
             if contracting: # exclude final padding
-                layer_attns = layer_attns[:,:-padding_needed,:-padding_needed]
-            #layer_attns = layer_attns.sum(axis=2).sum(axis=0) # sum over heads and remaining tokens
-            up_to_last_attns = layer_outputs[1][:-1].transpose(1,3).flatten(0,1).sum(2).sum(1)
-            last_attns = layer_outputs[1][-1,:,:-padding_needed,:-padding_needed].sum(axis=1).sum(axis=0)
-            layer_attns = torch.cat([up_to_last_attns, last_attns])
+                #layer_attns = layer_attns[:,:-padding_needed,:-padding_needed]
+                hidden_states_nop = hidden_states_nop.flatten(0,1)[:-padding_needed]
+                up_to_last_attns = layer_outputs[1][:-1].transpose(1,3).flatten(0,1).sum(2).sum(1)
+                last_attns = layer_outputs[1][-1,:,:-padding_needed,:-padding_needed].sum(axis=1).sum(axis=0)
+                layer_attns = torch.cat([up_to_last_attns, last_attns])
+                assert torch.allclose(layer_attns[133], layer_outputs[1][0,:,:,133].sum())
+                assert torch.allclose(layer_attns[757], layer_outputs[1][0,:,:,757].sum())
+                assert torch.allclose(layer_attns[22], layer_outputs[1][0,:,:,22].sum())
+            else:
+                layer_attns = layer_attns.sum([0,1])
             layer_attns = layer_attns[1:-1] # cut off bos and eos
-            assert torch.allclose(layer_attns[132], layer_outputs[1][0,:,:,133].sum())
-            assert torch.allclose(layer_attns[756], layer_outputs[1][0,:,:,757].sum())
-            assert torch.allclose(layer_attns[21], layer_outputs[1][0,:,:,22].sum())
 
-            if not ( running_span_sizes[-1] == len(layer_attns)):
+            print(f'sum of trees lengths: {running_span_sizes[-1]}\t hidden_states_nop length: {hidden_states_nop.shape}\tpadding needed: {padding_needed}\tattns: {layer_attns.shape}\tcontracting: {contracting}')
+            if not ( ( running_span_sizes[-1] == len(layer_attns))):
                 breakpoint()
             if len(hidden_states_nop) > 1024:
+                assert contracting
                 attn_chunks = [layer_attns[running_span_sizes[i]:running_span_sizes[i+1]] for i in range(len(trees))]
                 options = []
                 tok_idx = 0
                 for i, (t,ac) in enumerate(zip(trees, attn_chunks)):
-                #for t,ac in zip(trees, attn_chunks):
-                    if not ( t.root.span_size == ac.shape[0]):
+                    if not ( t.span_size == ac.shape[0]):
                         breakpoint()
                     new_drop_options, new_merge_options = t.determine_drops_and_merges(ac)
                     options += [(tok_idx+d.offset, 'drop', d, dcost, i) for d,dcost in new_drop_options]
                     options += [(tok_idx+m.offset, 'merge', m, mcost, i) for m,mcost in new_merge_options]
-                    tok_idx += t.root.span_size
+                    tok_idx += t.span_size
 
-                reductions = sorted(options, key=lambda x:x[3])[:300] # hard-coding 300 for now, could do some fancy sampling thing
+                assert set([x[2].span_size for x in options if x[1]=='drop']) == set([1])
+                n_to_drop = min(n_to_drop_at_each_layer, len(hidden_states_nop)-1022)
+                reductions = sorted(options, key=lambda x:x[3])[:n_to_drop] # hard-coding 300 for now, could do some fancy sampling thing
                 reductions = sorted(reductions, key=lambda x:x[0])
                 reduction_idxs = [x[0] for x in reductions]
                 reduced_hiddens = [hidden_states_nop[0]] # start with just bos, will add others in for loop
@@ -91,44 +97,73 @@ class SyntacticPoolingEncoder(BartEncoder):
                 hidden_states_nop_inner = hidden_states_nop[1:-1] # cut off bos and eos
                 n_to_exclude_after = 0
                 option_idx = 0
+                ts = lambda: sum(t.span_size for t in trees)
+                prev = ts()
+                assert prev==running_span_sizes[-1]
+                prev_tok_idx = -1
                 for i, hs in enumerate(hidden_states_nop_inner):
+                    print(i)
                     if i in reduction_idxs:
-                        print(option_idx)
-                        if not ( n_to_exclude_after==0):
-                            breakpoint()
                         tok_idx, red_type, node, _, tidx = reductions[option_idx]
+                        #print(f'tok idx: {tok_idx}\ttree idx: {tidx}\toption idx: {option_idx}')
+                        while option_idx<len(reductions) and reduction_idxs[option_idx]==i:
+                            option_idx+=1
+                        if prev_tok_idx==tok_idx:
+                            breakpoint()
+                        prev_tok_idx = tok_idx
+                        if n_to_exclude_after>0:
+                            n_to_exclude_after -= 1
+                            print(f'merged {i} now skipping {red_type} because ntea is {n_to_exclude_after}')
+                            continue
+                        if not ( node in trees[tidx].descendents):
+                            breakpoint()
                         assert tok_idx==i
                         if red_type == 'drop':
-                            #trees[tidx].drop(node)
+                            what_red_should_be = 1
                             if node.is_root:
-                                assert trees[tidx].children==[node]
-                                del trees[tidx]
-                            elif len(node.parent.children)==2:
+                                print('dropping rootleaf')
+                                assert trees[tidx].root==node
+                                trees[tidx].root = 'DROPPED'
+                            elif len(node.parent.children)==2: # replace the parent with the sibling
+                                sibling = [n for n in node.parent.children if n!=node][0]
                                 if node.parent.is_root:
-                                    node.parent.parent.root = node
+                                    if not ( node.parent==trees[tidx].root):
+                                        breakpoint()
+                                    trees[tidx].root = sibling
+                                    sibling.parent = trees[tidx]
+                                    assert sibling.is_root
                                 else:
-                                    node.parent.parent.children = [node if c==node.parent else c for c in node.parent.parent.children]
+                                    breakpoint()
+                                    node.parent.parent.children = [sibling if c==node.parent else c for c in node.parent.parent.children]
                             else:
-                                node.parent.children.remove(node)
+                                node.drop_non_root()
 
                         else:
-                            n_to_exclude_after = node.span_size
+                            n_to_exclude_after = node.span_size-1
+                            what_red_should_be = n_to_exclude_after
+                            print(f'merging node of size {node.span_size}')
                             node.merge()
-                            merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after])/layer_attns[i:i+n_to_exclude_after].sum()
+                            merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after]).sum(0)/layer_attns[i:i+n_to_exclude_after].sum()
                             reduced_hiddens.append(merged)
-                        option_idx += 1
+
+                        if not ( ts() == prev-what_red_should_be):
+
+                            breakpoint()
+                        prev = ts()
                     else:
-                        if n_to_exclude_after==0:
-                            reduced_hiddens.append(hs)
-                        else:
+                        if n_to_exclude_after>0:
+                            print(f'excluding because ntea is {n_to_exclude_after}')
                             n_to_exclude_after -= 1
+                        else:
+                            reduced_hiddens.append(hs)
+                            print(f'appending, rh now of length {len(reduced_hiddens)}')
 
                 reduced_hiddens.append(hidden_states_nop[-1]) # add eos
                 hidden_states_nop = torch.stack(reduced_hiddens)
+            else:
+                assert not contracting
 
-            breakpoint()
         return hidden_states_nop
-        #return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=None, attentions=None) # this means 'return_dict==True'
 
 class RootParseNode():
     def __init__(self, sent, word_toks):
@@ -145,25 +180,39 @@ class RootParseNode():
         assert len(self.parse.children)==1
         #self.split_idxs = []
         #self.tokenizer = tokenizer
-        self.root = ParseNode(self.parse, self, 0, word_toks)
+        #self.root = ParseNode(self.parse, self, 0, word_toks)
+        self.root = ParseNode(self.parse, self, word_toks, 0)
+
+    @property
+    def span_size(self):
+        if self.root=='DROPPED':
+            return 0
+        return self.root.span_size
+
+    @property
+    def descendents(self):
+        if self.root=='DROPPED':
+            return []
+        return self.root.descendents
 
     def list_mergables(self):
         return [n for n in self.descendents if not n.is_leaf and n.child_idx==0 and all(c.is_leaf for c in n.children)]
 
     def list_droppables(self):
+        if self.root=='DROPPED':
+            return []
         return [c for c in self.root.children if c.is_leaf]
 
     def determine_drops_and_merges(self, attention_weights):
-        possible_drops_costs = [(d, attention_weights[d.offset]) for d in self.list_droppables()]
-        possible_merges_costs = [(m, merge_cost(attention_weights[m.offset:m.offset+m.span_size])) for m in self.list_mergables()]
-        overlap = [n[0] for n in possible_drops_costs if n[0] in [m[0] for m in possible_merges_costs]]
-        if len(overlap)>0:
+        try:
+            possible_drops_costs = [(d, attention_weights[d.offset]) for d in self.list_droppables()]
+        except:
             breakpoint()
+        possible_merges_costs = [(m, merge_cost(attention_weights[m.offset:m.offset+m.span_size])) for m in self.list_mergables()]
+        #overlap = [n[0] for n in possible_drops_costs if n[0] in [m[0] for m in possible_merges_costs]]
+        #if len(overlap)>0:
+            #breakpoint()
         return possible_drops_costs, possible_merges_costs
-
-    @property
-    def descendents(self):
-        return self.root.descendents
 
 def merge_cost(merge_attns): # may also want to consider attention the mergees have for each other
     return merge_attns @ (1-merge_attns/merge_attns.sum())
@@ -179,43 +228,20 @@ def text_from_node_or_str(x):
 
 
 class ParseNode():
-    def __init__(self, stanza_node_or_text, parent, child_idx, word_toks):
+    def __init__(self, stanza_node_or_text, parent, word_toks, child_idx):
         self.parent = parent
         self.toks = word_toks
-        self.is_root = isinstance(self.parent, RootParseNode)
         self.child_idx = child_idx
-        self.is_leaf = False
+        #self.offset = offset
         self.is_orig_leaf = False
         if isinstance(stanza_node_or_text, str):
             self.text = stanza_node_or_text
-            #self.toks = tokenizer._tokenizer.encode_batch([self.text], add_special_tokens=False)[0].tokens
-            #self.toks = word_toks
             self.parse = None
             _children = self.toks if len(self.toks)>1 else []
         else:
             self.parse = stanza_node_or_text
             self.text = text_from_node_or_str(self.parse)
             n = self.parse
-            #self.text = ' '.join([str(n)[1:-1].split()[1] for n in self.parse.yield_preterminals()])
-            #self.toks = tokenizer._tokenizer.encode_batch([self.text], add_special_tokens=False)[0].tokens
-            #cleaned_children = []
-            #num_to_exclude_after = 0
-            #for i,c in enumerate(n.children):
-            #    if num_to_exclude_after > 0:
-            #        num_to_exclude_after -= 1
-            #        continue
-            #    combined_with_next_two = ''.join(text_from_node_or_str(c) for c in n.children[i:i+2])
-            #    if combined_with_next_two in contractions.keys():
-            #        cleaned_children.append(combined_with_next_two)
-            #        num_to_exclude_after = 2
-            #        continue
-            #    combined_with_next_one = ''.join(text_from_node_or_str(c) for c in n.children[i:i+1])
-            #    #if combined_with_next_one in ["can't", "won't", "didn't", "don't", "gotta", "aren't", "wasn't", "isn't", "haven't","hasn't","weren't"]:
-            #    if combined_with_next_one in contractions.keys():
-            #        cleaned_children.append(combined_with_next_one)
-            #        num_to_exclude_after = 1
-            #        continue
-            #    cleaned_children.append(c)
 
             while True:
                 if len(n.children) == 0:
@@ -227,8 +253,6 @@ class ParseNode():
                     _children = n.children
                     break
 
-        if self.is_root and self.is_leaf:
-            breakpoint()
         cleaned_children = []
         num_to_exclude_after = 0
         for i,child in enumerate(_children):
@@ -245,8 +269,6 @@ class ParseNode():
         remaining_word_toks = list(self.toks) # make copy
         child_words = [text_from_node_or_str(c) for c in cleaned_children]
         child_toks = []
-        #if len(child_words)>0 and child_words[0].startswith('Nate'):
-            #breakpoint()
         for i,cw in enumerate(child_words):
             word_toks_to_match = ''
             matching_word_toks = []
@@ -262,10 +284,10 @@ class ParseNode():
                 breakpoint()
             child_toks.append(matching_word_toks)
 
-        self.children = [ParseNode(c, self, i, cts) for i,(c,cts) in enumerate(zip(cleaned_children,child_toks))]
+        self.children = [ParseNode(c, self, cts, i) for i,(c,cts) in enumerate(zip(cleaned_children,child_toks))]
         if len(_children) == 0:
             self.children = []
-            self.is_leaf = True
+            #self.is_leaf = True
             self.is_orig_leaf = True
             self.span_size = 1
         else:
@@ -273,6 +295,22 @@ class ParseNode():
         if not ( strip_equals(''.join(self.toks), self.text)):
             breakpoint()
         assert self.span_size == len(self.toks)
+
+    @property
+    def is_leaf(self):
+        return len(self.children)==0
+
+    @property
+    def is_root(self):
+        return isinstance(self.parent, RootParseNode)
+
+    def recompute_sibling_child_idxs(self):
+        if self.is_root:
+            return
+        for s in self.parent.children[self.child_idx:]:
+            s.child_idx -= 1
+        assert self not in self.parent.children # should only be called after dropping
+        #return self.parent.children.index(self)
 
     @property
     def offset(self):
@@ -285,29 +323,44 @@ class ParseNode():
         return [self] + sum([c.descendents for c in self.children],[])
 
     def merge(self):
-        self.is_leaf = True
-        self.span_size = 1 #sum(c.span_size for c in self.children)
+        self.children = []
+        reduction = self.span_size-1
+        self.propagte_minus_span_size(reduction)
 
-    def drop(self):
-        if self.parent.text=='Starr shot me with this bullet .':
-            breakpoint()
+    def propagte_minus_span_size(self, reduction):
+        p = self
+        while isinstance(p, ParseNode):
+            p.span_size -= reduction
+            #p.child_idx = p.computed_child_idx()
+            p = p.parent
+        assert isinstance(p, RootParseNode)
+
+    def drop_non_root(self):
+        assert not self.is_root
         assert self.span_size == 1
-        self.parent.span_size -= 1
+        assert self.is_leaf
+        assert len(self.parent.children)!=2
         self.parent.children.remove(self)
-        if len(self.parent.children) == 1:
-            breakpoint()
-            self.root = self.root.children[0]
+        self.parent.propagte_minus_span_size(1)
+        self.recompute_sibling_child_idxs()
+
+    #def __eq__(self, other):
+        #return self.text==other.text and self.span_size==other.span_size and len(self.children)==len(other.children)
 
     def __repr__(self):
         toprint = ''
         for field in ('offset', 'span_size', 'text', 'child_idx'):
             if hasattr(self,field):
-                toprint += f'{field}: {getattr(self, field)}\n'
+                try:
+                    value = getattr(self, field)
+                except Exception as e:
+                    value = str(e) + str(type(e))
+                toprint += f'{field}: {value}\n'
         if hasattr(self,'children'):
-            toprint += f'num children: {len(self.children)}\n'
+            toprint += f'num children: {len(self.children)}\t'
         return toprint
         #f'Offset: {self.offset}\nSpan size: {self.span_size}\n Num children: {len(self.children)} Child idx: {self.child_idx}\n' + \
-        f'Preterminals: {"None" if self.parse is None else list(self.parse.yield_preterminals())}\nText: {self.text}\n'
+        f'Preterminals: {"None" if self.parse is None else list(self.parse.yield_preterminals())}\nText: {self.text}\t'
 
 
 if __name__ == '__main__':
