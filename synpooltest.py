@@ -20,23 +20,22 @@ for en in epname_list:
     with open(f'../amazon_video/SummScreen/transcripts/{en}.json') as f:
         trans = json.load(f)['Transcript']
 
-    trans_segment = trans[5:200]
+    trans_segment = trans
     full_text = '\n'.join(trans_segment)
-    full_text = full_text.replace('é','e').replace('."', '. "').replace(',"', ', "')
-    for k,v in contractions.items():
-        full_text = full_text.replace(k,v)
-        full_text = full_text.replace(k[0].upper()+k[1:],v[0].upper()+v[1:])
-    nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
-    doc = nlp(full_text)
+    full_text = full_text.replace('é','e').replace('."', '. "').replace(',"', ', "').replace('?"', '? "')#.replace('"?', '" ?')
+    #for k,v in contractions.items():
+        #full_text = full_text.replace(k,v)
+        #full_text = full_text.replace(k[0].upper()+k[1:],v[0].upper()+v[1:])
     all_anchors = []
-    if not os.path.isdir(epdir:=f'parse_trees/{en}'):
-        os.makedirs(epdir)
     trees = []
     token_ids = torch.tensor(tokenizer(full_text)['input_ids'])
-    remaining_word_toks = tokenizer._tokenizer.encode_batch([full_text], add_special_tokens=False)[0].tokens
-    remaining_token_ids = list(token_ids)
+    #remaining_word_toks = tokenizer._tokenizer.encode_batch([full_text], add_special_tokens=False)[0].tokens
+    remaining_word_toks = [tokenizer.decode(t) for t in tokenizer(full_text,add_special_tokens=False).input_ids]
+    #remaining_token_ids = [t.replace('Ġ',' ').replace('Ċ','\n').replace('ÃŃ','í') for t in remaining_word_toks]
     if not ( ''.join(remaining_word_toks).replace('Ġ',' ').replace('Ċ','\n') == full_text):
         breakpoint()
+    nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
+    doc = nlp(full_text)
     for i,sent in enumerate(doc.sentences):
         word_toks_to_match = ''
         matching_word_toks = []
@@ -46,10 +45,5 @@ for en in epname_list:
             matching_word_toks.append(new)
         new_tree = RootParseNode(sent, matching_word_toks)
         trees.append(new_tree)
-        with open(f'parse_trees/{en}/sent{i}.pkl','wb') as f:
-            pickle.dump(new_tree, f)
-        with open(f'parse_trees/{en}/sent{i}.pkl','rb') as f:
-            treloaded = pickle.load(f)
-        assert new_tree.parse==treloaded.parse
 
     m(input_ids=token_ids, trees=trees)

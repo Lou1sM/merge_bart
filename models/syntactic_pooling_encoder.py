@@ -23,54 +23,68 @@ class SyntacticPoolingEncoder(BartEncoder):
         default_bart_config = BartConfig()
         super().__init__(default_bart_config)
 
+    def batchify(self, unbatched_hidden_states_nop):
+        self.contracting = len(unbatched_hidden_states_nop) > 1024
+        if (self.contracting):
+            self.pseudo_batch_size = math.ceil(unbatched_hidden_states_nop.shape[0]/1024) # assuming hidden_states shape is (n_tokens, emb_size)
+            self.padding_needed = self.pseudo_batch_size*1024 - len(unbatched_hidden_states_nop)
+            padded = torch.cat([unbatched_hidden_states_nop] + [torch.zeros_like(unbatched_hidden_states_nop[:1]) for _ in range(self.padding_needed)])
+            self.hidden_states_nop = padded.reshape(-1,1024,unbatched_hidden_states_nop.shape[1])
+            attention_mask = torch.ones_like(self.hidden_states_nop[:,:,0])
+            attention_mask[-1,-self.padding_needed:] = 0
+            #attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, inputs_embeds.dtype)
+            self.attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, torch.float32)
+        else:
+            self.attention_mask = None
+            self.hidden_states_nop = unbatched_hidden_states_nop.unsqueeze(0)
+            self.padding_needed = 0
+
     def forward(self, input_ids, trees):
         inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
 
-        hidden_states_nop = inputs_embeds #'nop' means no positional embeds, will add them in the for loop
-        hidden_states_nop = self.layernorm_embedding(hidden_states_nop)
-        hidden_states_nop = nn.functional.dropout(hidden_states_nop, p=self.dropout, training=self.training)
+        unbatched_hidden_states_nop = inputs_embeds #'nop' means no positional embeds, will add them in the for loop
+        unbatched_hidden_states_nop = self.layernorm_embedding(unbatched_hidden_states_nop)
+        unbatched_hidden_states_nop = nn.functional.dropout(unbatched_hidden_states_nop, p=self.dropout, training=self.training)
 
-        n_to_drop_at_each_layer = 500
+        n_to_drop_at_each_layer = 1500
 
         for idx, encoder_layer in enumerate(self.layers):
             running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
-            if not ( running_span_sizes[-1] == len(hidden_states_nop) - 2): # -2 for bos and eos
+            #if hidden_states_nop.ndim==3:
+            #    assert idx>1
+            #    assert contracting
+            #    assert hidden_states_nop.shape[0] == 1
+            #    n_toks = hidden_states_nop.shape[1]
+            #else:
+            n_toks = unbatched_hidden_states_nop.shape[0]
+            assert unbatched_hidden_states_nop.ndim == 2
+            if not ( ( running_span_sizes[-1] == n_toks - 2)):
                 breakpoint()
-            if (contracting:=len(hidden_states_nop) > 1024):
-                pseudo_batch_size = math.ceil(hidden_states_nop.shape[0]/1024) # assuming hidden_states shape is (n_tokens, emb_size)
-                padding_needed = pseudo_batch_size*1024 - len(hidden_states_nop)
-                padded = torch.cat([hidden_states_nop] + [torch.zeros_like(hidden_states_nop[:1]) for _ in range(padding_needed)])
-                hidden_states_nop = padded.reshape(-1,1024,hidden_states_nop.shape[1])
-                attention_mask = torch.ones_like(hidden_states_nop[:,:,0])
-                attention_mask[-1,-padding_needed:] = 0
-                attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, inputs_embeds.dtype)
-            else:
-                attention_mask = None
-                hidden_states_nop = hidden_states_nop.unsqueeze(0)
-                padding_needed = 0
-            embed_pos = self.embed_positions(hidden_states_nop[:,:,-1])
-            hidden_states = hidden_states_nop + embed_pos
-            layer_outputs = encoder_layer(hidden_states, attention_mask=attention_mask, layer_head_mask=None, output_attentions=True)
-            hidden_states_nop = layer_outputs[0] - embed_pos
+            self.batchify(unbatched_hidden_states_nop) # sets hidden_states_nop
+            embed_pos = self.embed_positions(self.hidden_states_nop[:,:,-1])
+            hidden_states = self.hidden_states_nop + embed_pos
+            layer_outputs = encoder_layer(hidden_states, attention_mask=self.attention_mask, layer_head_mask=None, output_attentions=True)
+            self.hidden_states_nop = layer_outputs[0] - embed_pos
             # output from HF is (bsz, n_heads, seqlen, seqlen), take sum over all heads and all query tokens except the final padding
             layer_attns = layer_outputs[1].transpose(0,1).flatten(1,2)
-            if contracting: # exclude final padding
-                hidden_states_nop = hidden_states_nop.flatten(0,1)[:-padding_needed]
+            if self.contracting: # exclude final padding
+                unbatched_hidden_states_nop = self.hidden_states_nop.flatten(0,1)[:-self.padding_needed]
                 up_to_last_attns = layer_outputs[1][:-1].transpose(1,3).flatten(0,1).sum(2).sum(1)
-                last_attns = layer_outputs[1][-1,:,:-padding_needed,:-padding_needed].sum(axis=1).sum(axis=0)
+                last_attns = layer_outputs[1][-1,:,:-self.padding_needed,:-self.padding_needed].sum(axis=1).sum(axis=0)
                 layer_attns = torch.cat([up_to_last_attns, last_attns])
                 assert torch.allclose(layer_attns[133], layer_outputs[1][0,:,:,133].sum())
                 assert torch.allclose(layer_attns[757], layer_outputs[1][0,:,:,757].sum())
                 assert torch.allclose(layer_attns[22], layer_outputs[1][0,:,:,22].sum())
             else:
                 layer_attns = layer_attns.sum([0,1])
+                unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
             layer_attns = layer_attns[1:-1] # cut off bos and eos
 
-            #print(f'layer idx: {idx}\tsum of trees lengths: {running_span_sizes[-1]}\t hidden_states_nop length: {hidden_states_nop.shape}\tpadding needed: {padding_needed}\tattns: {layer_attns.shape}\tcontracting: {contracting}')
+            print(f'layer idx: {idx}\tsum of trees lengths: {running_span_sizes[-1]}\t hidden_states_nop shape: {unbatched_hidden_states_nop.shape}\tpadding needed: {self.padding_needed}\tattns: {layer_attns.shape}\tcontracting: {self.contracting}')
             if not ( ( running_span_sizes[-1] == len(layer_attns))):
                 breakpoint()
-            if len(hidden_states_nop) > 1024:
-                assert contracting
+            if len(unbatched_hidden_states_nop) > 1024:
+                assert self.contracting
                 attn_chunks = [layer_attns[running_span_sizes[i]:running_span_sizes[i+1]] for i in range(len(trees))]
                 options = []
                 tok_idx = 0
@@ -83,12 +97,12 @@ class SyntacticPoolingEncoder(BartEncoder):
                     tok_idx += t.span_size
 
                 assert set([x[2].span_size for x in options if x[1]=='drop']) == set([1])
-                n_to_drop = min(n_to_drop_at_each_layer, len(hidden_states_nop)-1022)
+                n_to_drop = min(n_to_drop_at_each_layer, len(unbatched_hidden_states_nop)-1022)
                 reductions = sorted(options, key=lambda x:x[3])[:n_to_drop] # hard-coding 300 for now, could do some fancy sampling thing
                 reductions = sorted(reductions, key=lambda x:x[0])
                 reduction_idxs = [x[0] for x in reductions]
-                reduced_hiddens = [hidden_states_nop[0]] # start with just bos, will add others in for loop
-                hidden_states_nop_inner = hidden_states_nop[1:-1] # cut off bos and eos
+                reduced_hiddens = [unbatched_hidden_states_nop[0]] # start with just bos, will add others in for loop
+                hidden_states_nop_inner = unbatched_hidden_states_nop[1:-1] # drop bos/eos
                 n_to_exclude_after = 0
                 option_idx = 0
                 ts = lambda: sum(t.span_size for t in trees)
@@ -96,7 +110,6 @@ class SyntacticPoolingEncoder(BartEncoder):
                 assert prev==running_span_sizes[-1]
                 prev_tok_idx = -1
                 for i, hs in enumerate(hidden_states_nop_inner):
-                    print(i)
                     if i in reduction_idxs:
                         tok_idx, red_type, node, _, tidx = reductions[option_idx]
                         #print(f'tok idx: {tok_idx}\ttree idx: {tidx}\toption idx: {option_idx}')
@@ -137,9 +150,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                             merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after]).sum(0)/layer_attns[i:i+n_to_exclude_after].sum()
                             reduced_hiddens.append(merged)
 
-                        if not ( ts() == prev-what_red_should_be):
-
-                            breakpoint()
+                        assert ( ts() == prev-what_red_should_be)
                         prev = ts()
                     else:
                         if n_to_exclude_after>0:
@@ -147,12 +158,16 @@ class SyntacticPoolingEncoder(BartEncoder):
                         else:
                             reduced_hiddens.append(hs)
 
-                reduced_hiddens.append(hidden_states_nop[-1]) # add eos
-                hidden_states_nop = torch.stack(reduced_hiddens)
+                reduced_hiddens.append(unbatched_hidden_states_nop[-1]) # add eos
+                unbatched_hidden_states_nop = torch.stack(reduced_hiddens)
             else:
-                assert not contracting
+                assert not self.contracting
+                #unbatched_hidden_states_nop = hidden_states_nop.squeeze(0)
 
-        return hidden_states_nop
+        final_hidden_states = self.hidden_states_nop.unsqueeze(0)
+        embed_pos = self.embed_positions(final_hidden_states[:,-1])
+        final_hidden_states = final_hidden_states + embed_pos
+        return final_hidden_states
 
 class RootParseNode():
     def __init__(self, sent, word_toks):
@@ -199,7 +214,9 @@ def text_from_node_or_str(x):
     else:
         assert isinstance(x, Tree)
         joined_terminals = ' '.join([str(n)[1:-1].split()[1] for n in x.yield_preterminals()])
-        return joined_terminals.replace(' , ',', ').replace(' ; ','; ').replace(' . ','. ')
+        text = joined_terminals.replace(' , ',', ').replace(' ; ','; ').replace(' . ','. ').replace(' " ','" ')
+        text = re.sub(r'\" (\w+) \"',r'"\1"',joined_terminals) # remove space around "
+        return text
 
 
 class ParseNode():
@@ -228,44 +245,75 @@ class ParseNode():
                     _children = n.children
                     break
 
-        cleaned_children = []
-        num_to_exclude_after = 0
-        for i,child in enumerate(_children):
-            if num_to_exclude_after > 0:
-                num_to_exclude_after -= 1
-                continue
-            combined_with_next_one = ''.join(text_from_node_or_str(c) for c in _children[i:i+2])
-            if combined_with_next_one=='cannot': # treat separately because don't want to make 'can not', even though stanza parses it so
-                cleaned_children.append(combined_with_next_one)
-                num_to_exclude_after = 1
-                continue
-            cleaned_children.append(child)
-
-        remaining_word_toks = list(self.toks) # make copy
-        child_words = [text_from_node_or_str(c) for c in cleaned_children]
-        child_toks = []
-        for i,cw in enumerate(child_words):
-            word_toks_to_match = ''
-            matching_word_toks = []
-            while not equals_mod_whitespace(word_toks_to_match, cw):
-                new = remaining_word_toks.pop(0).replace('Ġ',' ').replace('Ċ','\n')
-                word_toks_to_match += new
-                matching_word_toks.append(new)
-                if len(word_toks_to_match.lstrip()) > len(cw.lstrip()):
-                    breakpoint()
-            if not ( matching_word_toks != []):
-                breakpoint()
-            child_toks.append(matching_word_toks)
-
-        self.children = [ParseNode(c, self, cts, i) for i,(c,cts) in enumerate(zip(cleaned_children,child_toks))]
-        if len(_children) == 0:
+        assert equals_mod_whitespace(self.text, ''.join(self.toks))
+        if len(self.toks) == 1:
             self.children = []
             self.is_orig_leaf = True
             self.span_size = 1
-        else:
-            self.span_size = sum(c.span_size for c in self.children)
-        if not ( strip_equals(''.join(self.toks), self.text)):
-            breakpoint()
+            return
+
+        # else, set children by matching parse words and tokens
+        cleaned_children = _children
+        #num_to_exclude_after = 0
+        #for i,child in enumerate(_children):
+        #    if num_to_exclude_after > 0:
+        #        num_to_exclude_after -= 1
+        #        continue
+        #    combined_with_next_one = ''.join(text_from_node_or_str(c) for c in _children[i:i+2])
+        #    if combined_with_next_one=='cannot': # treat separately because don't want to make 'can not', even though stanza parses it so
+        #        cleaned_children.append(combined_with_next_one)
+        #        num_to_exclude_after = 1
+        #        continue
+        #    cleaned_children.append(child)
+
+        #remaining_word_toks = list(self.toks) # make copy
+        parse_words = [text_from_node_or_str(c) for c in cleaned_children]
+        child_toks = []
+        pw_start = 0; tok_start = 0
+        #for i,cw in enumerate(child_words):
+        cm_children = []
+        toks_to_iter = [] if len(self.toks)==1 else self.toks
+        while True:
+            #word_toks_to_match = ''
+            #matching_word_toks = []
+            #while not equals_mod_whitespace(word_toks_to_match, cw):
+            pw_span = 1
+            tok_span = 1
+            while True:
+                #new = remaining_word_toks.pop(0)#.replace('Ġ',' ').replace('Ċ','\n')
+                #word_toks_to_match += new
+                #matching_word_toks.append(new)
+                pw_chunk = parse_words[pw_start:pw_start+pw_span]
+                tok_chunk = toks_to_iter[tok_start:tok_start+tok_span]
+                #print(f'pw: {"".join(pw_chunk)}\ttoks: {"".join(tok_chunk)}\tpwspan: {pw_span}\ttokspan: {tok_span}\tpwstart: {pw_start}\ttokstart: {tok_start}')
+                if equals_mod_whitespace(''.join(pw_chunk), ''.join(tok_chunk)):
+                    break
+                elif len(''.join(pw_chunk).strip()) > len(''.join(tok_chunk).strip()): #normal way
+                    tok_span += 1
+                elif len(''.join(tok_chunk).strip()) > len(''.join(pw_chunk).strip()): #weird way
+                    pw_span += 1
+                else: # shouldn't happen
+                    breakpoint()
+
+                if max(pw_span,tok_span)>300:
+                    breakpoint()
+            #assert pw_span==1 or tok_span==1
+            if pw_span > tok_span:
+                print(f'matching multiple syntax nodes to a single token, {tok_chunk} matched to {parse_words[pw_start:pw_start+pw_span]}')
+            child_toks.append(tok_chunk)
+            cm_children.append(''.join(pw_chunk))
+            pw_start += pw_span
+            tok_start += tok_span
+            assert (pw_start>=len(parse_words)) == (tok_start>=len(toks_to_iter))
+            if pw_start>len(parse_words):
+                assert parse_words==toks_to_iter==[]
+            if pw_start>=len(parse_words):
+                break
+            #if not ( matching_word_toks != []):
+                #breakpoint()
+
+        self.children = [ParseNode(c, self, cts, i) for i,(c,cts) in enumerate(zip(cm_children,child_toks))]
+        self.span_size = sum(c.span_size for c in self.children)
         assert self.span_size == len(self.toks)
 
     @property

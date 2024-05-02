@@ -12,5 +12,6 @@ class MergeBart(BartModel):
         elif encoder_type == 'pool':
             self.encoder = PoolingEncoder()
 
-    def forward(self):
-        raise NotImplementedError
+    def forward(self, input_ids, trees):
+        encoder_hiddens = self.encoder(input_ids, trees)
+        return self.decoder(input_ids=input_ids, encoder_hidden_states=encoder_hiddens)
