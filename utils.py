@@ -1,4 +1,16 @@
+from stanza.models.constituency.parse_tree import Tree
+import re
 
+
+def text_from_node_or_str(x):
+    if isinstance(x, str):
+        return x
+    else:
+        assert isinstance(x, Tree)
+        joined_terminals = ' '.join([str(n)[1:-1].split()[1] for n in x.yield_preterminals()])
+        text = joined_terminals.replace(' , ',', ').replace(' ; ','; ').replace(' . ','. ').replace(' " ','" ')
+        text = re.sub(r'\" (\w+) \"',r'"\1"',joined_terminals) # remove space around "
+        return text
 
 def match_word_toks_to_sents(word_toks, sents):
     remaining_word_toks = list(word_toks) # make copy
@@ -10,7 +22,6 @@ def match_word_toks_to_sents(word_toks, sents):
             word_toks_to_match += new
             matching_word_toks.append(new)
             print(word_toks_to_match)
-
 
 def strip_equals(s1,s2):
     return s1.replace(' ','').replace('\n','') == s2.replace(' ','').replace('\n','')

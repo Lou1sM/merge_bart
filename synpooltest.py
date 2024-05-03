@@ -1,12 +1,10 @@
 import stanza
-import os
-import pickle
 from transformers import AutoTokenizer
 import json
 import re
 import torch
 from models.syntactic_pooling_encoder import SyntacticPoolingEncoder, RootParseNode
-#import argparse
+from models.merge_bart import MergeBart
 from contractions import contractions
 from utils import equals_mod_whitespace
 
@@ -14,6 +12,7 @@ from utils import equals_mod_whitespace
 torch.manual_seed(0)
 
 m = SyntacticPoolingEncoder()
+mb = MergeBart()
 epname_list = ['oltl-10-18-10']
 tokenizer  = AutoTokenizer.from_pretrained('kabita-choudhary/finetuned-bart-for-conversation-summary')
 for en in epname_list:
@@ -22,18 +21,12 @@ for en in epname_list:
 
     trans_segment = trans
     full_text = '\n'.join(trans_segment)
-    full_text = full_text.replace('é','e').replace('."', '. "').replace(',"', ', "').replace('?"', '? "')#.replace('"?', '" ?')
-    #for k,v in contractions.items():
-        #full_text = full_text.replace(k,v)
-        #full_text = full_text.replace(k[0].upper()+k[1:],v[0].upper()+v[1:])
     all_anchors = []
     trees = []
     token_ids = torch.tensor(tokenizer(full_text)['input_ids'])
-    #remaining_word_toks = tokenizer._tokenizer.encode_batch([full_text], add_special_tokens=False)[0].tokens
     remaining_word_toks = [tokenizer.decode(t) for t in tokenizer(full_text,add_special_tokens=False).input_ids]
-    #remaining_token_ids = [t.replace('Ġ',' ').replace('Ċ','\n').replace('ÃŃ','í') for t in remaining_word_toks]
-    if not ( ''.join(remaining_word_toks).replace('Ġ',' ').replace('Ċ','\n') == full_text):
-        breakpoint()
+    assert 'Ġ' not in full_text
+    assert 'Ċ' not in full_text
     nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
     doc = nlp(full_text)
     for i,sent in enumerate(doc.sentences):
@@ -47,3 +40,4 @@ for en in epname_list:
         trees.append(new_tree)
 
     m(input_ids=token_ids, trees=trees)
+    #mb.generate(input_ids=token_ids, trees=trees)
