@@ -4,7 +4,7 @@ import re
 import math
 import torch
 import torch.nn as nn
-#from transformers.modeling_outputs import BaseModelOutput
+from transformers.modeling_outputs import BaseModelOutput
 from transformers import BartConfig
 #from ...modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
@@ -17,6 +17,7 @@ nltk.download('punkt')
 class SyntacticPoolingEncoder(BartEncoder):
     def __init__(self):
         default_bart_config = BartConfig()
+        default_bart_config.vocab_size = 50264
         super().__init__(default_bart_config)
 
     def batchify(self, unbatched_hidden_states_nop):
@@ -31,11 +32,18 @@ class SyntacticPoolingEncoder(BartEncoder):
             #attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, inputs_embeds.dtype)
             self.attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, torch.float32)
         else:
+            self.pseudo_batch_size = 1
             self.attention_mask = None
             self.hidden_states_nop = unbatched_hidden_states_nop.unsqueeze(0)
             self.padding_needed = 0
 
-    def forward(self, input_ids, trees):
+    def forward(self, input_ids, trees, **kwargs):
+        if input_ids.ndim == 2: # can't do batching atm
+            assert input_ids.shape[0]==1 # there could be a dummy batch dim
+            input_ids = input_ids.squeeze(0)
+        else:
+            assert input_ids.ndim==1
+
         inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
 
         unbatched_hidden_states_nop = inputs_embeds #'nop' means no pos embeds, for now
@@ -156,7 +164,8 @@ class SyntacticPoolingEncoder(BartEncoder):
         final_hidden_states = self.hidden_states_nop.unsqueeze(0)
         embed_pos = self.embed_positions(final_hidden_states[:,-1])
         final_hidden_states = final_hidden_states + embed_pos
-        return final_hidden_states
+        return BaseModelOutput(last_hidden_state=final_hidden_states)
+        #return final_hidden_states
 
 class RootParseNode():
     def __init__(self, sent, word_toks):
