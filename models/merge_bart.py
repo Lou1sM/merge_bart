@@ -23,8 +23,8 @@ class MergeBart(BartForConditionalGeneration):
 
     def forward(self, input_ids, trees, labels):
         encoder_outputs = self.model.encoder(input_ids, trees)
-        decoder_input_ids = labels[:-1]
-        labels = labels[1:]
+        decoder_input_ids = labels[:,:-1]
+        labels = labels[:,1:]
         decoder_outputs = self.model.decoder(
             input_ids=decoder_input_ids,
             encoder_hidden_states=encoder_outputs[0],

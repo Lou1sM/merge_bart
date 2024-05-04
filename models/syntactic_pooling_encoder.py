@@ -25,13 +25,14 @@ class SyntacticPoolingEncoder(BartEncoder):
             self.pseudo_batch_size = math.ceil(unbatched_hidden_states_nop.shape[0]/self.seq_len) # assuming hidden_states shape is (n_tokens, emb_size)
             self.chunk_size = math.ceil(len(unbatched_hidden_states_nop)/ self.pseudo_batch_size)
             self.padding_needed = self.pseudo_batch_size*self.chunk_size - len(unbatched_hidden_states_nop)
-            padded = torch.cat([unbatched_hidden_states_nop, torch.zeros(self.padding_needed, self.nz)])
+            padded = torch.cat([unbatched_hidden_states_nop, torch.zeros(self.padding_needed, self.nz).to(unbatched_hidden_states_nop.device)])
             self.hidden_states_nop = padded.reshape(self.pseudo_batch_size,self.chunk_size,self.nz)
             attention_mask = torch.ones_like(self.hidden_states_nop[:,:,0])
             attention_mask[-1,-self.padding_needed:] = 0
             self.attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, torch.float32)
         else:
             self.pseudo_batch_size = 1
+            self.chunk_size = len(unbatched_hidden_states_nop)
             self.attention_mask = None
             self.hidden_states_nop = unbatched_hidden_states_nop.unsqueeze(0)
             self.padding_needed = 0
@@ -51,10 +52,9 @@ class SyntacticPoolingEncoder(BartEncoder):
 
         for idx, encoder_layer in enumerate(self.layers):
             running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
-            n_toks = unbatched_hidden_states_nop.shape[0]
             assert unbatched_hidden_states_nop.ndim == 2
-            if not ( ( running_span_sizes[-1] == n_toks - 2)):
-                breakpoint()
+            n_toks = unbatched_hidden_states_nop.shape[0]
+            assert ( ( running_span_sizes[-1] == n_toks - 2))
             self.batchify(unbatched_hidden_states_nop) # sets self.hidden_states_nop
             embed_pos = self.embed_positions(self.hidden_states_nop[:,:,-1])
             hidden_states = self.hidden_states_nop + embed_pos
