@@ -15,21 +15,21 @@ nltk.download('punkt')
 
 
 class SyntacticPoolingEncoder(BartEncoder):
-    def __init__(self):
-        default_bart_config = BartConfig()
-        default_bart_config.vocab_size = 50264
-        super().__init__(default_bart_config)
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.nz = self.config.d_model
+        self.seq_len = self.config.max_position_embeddings
 
     def batchify(self, unbatched_hidden_states_nop):
-        self.contracting = len(unbatched_hidden_states_nop) > 1024
+        self.contracting = len(unbatched_hidden_states_nop) > self.seq_len
         if (self.contracting):
-            self.pseudo_batch_size = math.ceil(unbatched_hidden_states_nop.shape[0]/1024) # assuming hidden_states shape is (n_tokens, emb_size)
-            self.padding_needed = self.pseudo_batch_size*1024 - len(unbatched_hidden_states_nop)
-            padded = torch.cat([unbatched_hidden_states_nop] + [torch.zeros_like(unbatched_hidden_states_nop[:1]) for _ in range(self.padding_needed)])
-            self.hidden_states_nop = padded.reshape(-1,1024,unbatched_hidden_states_nop.shape[1])
+            self.pseudo_batch_size = math.ceil(unbatched_hidden_states_nop.shape[0]/self.seq_len) # assuming hidden_states shape is (n_tokens, emb_size)
+            self.chunk_size = math.ceil(len(unbatched_hidden_states_nop)/ self.pseudo_batch_size)
+            self.padding_needed = self.pseudo_batch_size*self.chunk_size - len(unbatched_hidden_states_nop)
+            padded = torch.cat([unbatched_hidden_states_nop, torch.zeros(self.padding_needed, self.nz)])
+            self.hidden_states_nop = padded.reshape(self.pseudo_batch_size,self.chunk_size,self.nz)
             attention_mask = torch.ones_like(self.hidden_states_nop[:,:,0])
             attention_mask[-1,-self.padding_needed:] = 0
-            #attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, inputs_embeds.dtype)
             self.attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, torch.float32)
         else:
             self.pseudo_batch_size = 1
@@ -70,18 +70,18 @@ class SyntacticPoolingEncoder(BartEncoder):
                 up_to_last_attns = layer_outputs[1][:-1].transpose(1,3).flatten(0,1).sum(2).sum(1)
                 last_attns = layer_outputs[1][-1,:,:-self.padding_needed,:-self.padding_needed].sum(axis=1).sum(axis=0)
                 layer_attns = torch.cat([up_to_last_attns, last_attns])
-                assert torch.allclose(layer_attns[133], layer_outputs[1][0,:,:,133].sum())
-                assert torch.allclose(layer_attns[757], layer_outputs[1][0,:,:,757].sum())
-                assert torch.allclose(layer_attns[22], layer_outputs[1][0,:,:,22].sum())
+                for tn in (22,133,757):
+                    if tn >= self.chunk_size:
+                        break
+                    assert torch.allclose(layer_attns[tn], layer_outputs[1][0,:,:,tn].sum())
             else:
                 layer_attns = layer_attns.sum([0,1])
                 unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
             layer_attns = layer_attns[1:-1] # cut off bos and eos
 
             print(f'layer idx: {idx}\tsum of trees lengths: {running_span_sizes[-1]}\t hidden_states_nop shape: {list(unbatched_hidden_states_nop.shape)}\tpadding needed: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tcontracting: {self.contracting}')
-            if not ( ( running_span_sizes[-1] == len(layer_attns))):
-                breakpoint()
-            if len(unbatched_hidden_states_nop) > 1024:
+            assert ( ( running_span_sizes[-1] == len(layer_attns)))
+            if len(unbatched_hidden_states_nop) > self.seq_len:
                 assert self.contracting
                 attn_chunks = [layer_attns[running_span_sizes[i]:running_span_sizes[i+1]] for i in range(len(trees))]
                 options = []
@@ -95,8 +95,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                     tok_idx += t.span_size
 
                 assert set([x[2].span_size for x in options if x[1]=='drop']) == set([1])
-                n_to_drop = min(n_to_drop_at_each_layer, len(unbatched_hidden_states_nop)-1022)
-                reductions = sorted(options, key=lambda x:x[3])[:n_to_drop] # hard-coding 300 for now, could do some fancy sampling thing
+                n_to_drop = min(n_to_drop_at_each_layer, len(unbatched_hidden_states_nop)-self.seq_len+2)
+                reductions = sorted(options, key=lambda x:x[3])[:n_to_drop]
                 reductions = sorted(reductions, key=lambda x:x[0])
                 reduction_idxs = [x[0] for x in reductions]
                 reduced_hiddens = [unbatched_hidden_states_nop[0]] # start with just bos, will add others in for loop

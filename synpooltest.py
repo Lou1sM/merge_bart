@@ -36,7 +36,7 @@ for en in epname_list:
         word_toks_to_match = ''
         matching_word_toks = []
         while not equals_mod_whitespace(word_toks_to_match, sent.text):
-            new = remaining_word_toks.pop(0).replace('Ġ',' ').replace('Ċ','\n')
+            new = remaining_word_toks.pop(0)
             word_toks_to_match += new
             matching_word_toks.append(new)
 
@@ -49,4 +49,4 @@ for en in epname_list:
     #m(input_ids=token_ids, trees=trees)
     genned = mb.generate(token_ids, trees=trees, min_len=100)
     breakpoint()
-    print(mb.tokenizer.decode(genned[0], cleanup_special_tokens=True))
+    print(mb.tokenizer.decode(genned, cleanup_special_tokens=True))

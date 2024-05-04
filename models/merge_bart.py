@@ -15,7 +15,7 @@ class MergeBart(BartForConditionalGeneration):
         default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
         super().__init__(default_bart_config)
         if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder()
+            self.model.encoder = SyntacticPoolingEncoder(default_bart_config)
         elif encoder_type == 'pool':
             self.model.encoder = PoolingEncoder()
         self.load_state_dict(loaded_state_dict)
