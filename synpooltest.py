@@ -1,4 +1,5 @@
 import stanza
+from copy import deepcopy
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import json
 import re
@@ -47,6 +48,8 @@ for en in epname_list:
         trees.append(new_tree)
 
     #m(input_ids=token_ids, trees=trees)
-    genned = mb.generate(token_ids, trees=trees, min_len=100)
-    breakpoint()
-    print(mb.tokenizer.decode(genned, cleanup_special_tokens=True))
+    for nc in [500,700,900,1100,1300]:
+        mb.model.encoder.n_contract = nc
+        copied_trees = [deepcopy(t) for t in trees]
+        genned = mb.generate(token_ids, trees=copied_trees, min_len=100)
+        print(mb.tokenizer.decode(genned, cleanup_special_tokens=True))

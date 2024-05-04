@@ -5,8 +5,6 @@ import math
 import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutput
-from transformers import BartConfig
-#from ...modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
 import nltk
 #import re
@@ -15,10 +13,11 @@ nltk.download('punkt')
 
 
 class SyntacticPoolingEncoder(BartEncoder):
-    def __init__(self, cfg):
+    def __init__(self, cfg, n_contract):
         super().__init__(cfg)
         self.nz = self.config.d_model
         self.seq_len = self.config.max_position_embeddings
+        self.n_contract = n_contract
 
     def batchify(self, unbatched_hidden_states_nop):
         self.contracting = len(unbatched_hidden_states_nop) > self.seq_len
@@ -50,8 +49,6 @@ class SyntacticPoolingEncoder(BartEncoder):
         unbatched_hidden_states_nop = self.layernorm_embedding(unbatched_hidden_states_nop)
         unbatched_hidden_states_nop = nn.functional.dropout(unbatched_hidden_states_nop, p=self.dropout, training=self.training)
 
-        n_to_drop_at_each_layer = 1500
-
         for idx, encoder_layer in enumerate(self.layers):
             running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
             n_toks = unbatched_hidden_states_nop.shape[0]
@@ -66,9 +63,13 @@ class SyntacticPoolingEncoder(BartEncoder):
             # output from HF is (bsz, n_heads, seqlen, seqlen), take sum over all heads and all query tokens except the final padding
             layer_attns = layer_outputs[1].transpose(0,1).flatten(1,2)
             if self.contracting: # exclude final padding
-                unbatched_hidden_states_nop = self.hidden_states_nop.flatten(0,1)[:-self.padding_needed]
+                unbatched_hidden_states_nop = self.hidden_states_nop.flatten(0,1)
                 up_to_last_attns = layer_outputs[1][:-1].transpose(1,3).flatten(0,1).sum(2).sum(1)
-                last_attns = layer_outputs[1][-1,:,:-self.padding_needed,:-self.padding_needed].sum(axis=1).sum(axis=0)
+                last_attns = layer_outputs[1][-1]
+                if self.padding_needed>0:
+                    unbatched_hidden_states_nop = unbatched_hidden_states_nop[:-self.padding_needed]
+                    last_attns = last_attns[:,:-self.padding_needed,:-self.padding_needed]
+                last_attns = last_attns.sum(axis=1).sum(axis=0)
                 layer_attns = torch.cat([up_to_last_attns, last_attns])
                 for tn in (22,133,757):
                     if tn >= self.chunk_size:
@@ -79,7 +80,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                 unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
             layer_attns = layer_attns[1:-1] # cut off bos and eos
 
-            print(f'layer idx: {idx}\tsum of trees lengths: {running_span_sizes[-1]}\t hidden_states_nop shape: {list(unbatched_hidden_states_nop.shape)}\tpadding needed: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tcontracting: {self.contracting}')
+            print(f'layer idx: {idx}\tsum treelengths: {running_span_sizes[-1]}\t hidden_states_nop: {list(unbatched_hidden_states_nop.shape)}\tpadding needed: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
             assert ( ( running_span_sizes[-1] == len(layer_attns)))
             if len(unbatched_hidden_states_nop) > self.seq_len:
                 assert self.contracting
@@ -95,7 +96,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                     tok_idx += t.span_size
 
                 assert set([x[2].span_size for x in options if x[1]=='drop']) == set([1])
-                n_to_drop = min(n_to_drop_at_each_layer, len(unbatched_hidden_states_nop)-self.seq_len+2)
+                n_to_drop = min(self.n_contract, len(unbatched_hidden_states_nop)-self.seq_len+2)
                 reductions = sorted(options, key=lambda x:x[3])[:n_to_drop]
                 reductions = sorted(reductions, key=lambda x:x[0])
                 reduction_idxs = [x[0] for x in reductions]

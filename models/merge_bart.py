@@ -8,14 +8,14 @@ from torch.nn import CrossEntropyLoss
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, encoder_type, load_from):
+    def __init__(self, encoder_type, load_from, n_contract=1000):
         default_bart_config = BartConfig()
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
         loaded_state_dict = AutoModelForSeq2SeqLM.from_pretrained(load_from).state_dict()
         default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
         super().__init__(default_bart_config)
         if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder(default_bart_config)
+            self.model.encoder = SyntacticPoolingEncoder(default_bart_config,n_contract)
         elif encoder_type == 'pool':
             self.model.encoder = PoolingEncoder()
         self.load_state_dict(loaded_state_dict)
