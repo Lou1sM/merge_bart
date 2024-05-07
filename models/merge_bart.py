@@ -1,4 +1,5 @@
 from transformers import BartForConditionalGeneration, BartConfig
+from transformers.models.auto.configuration_auto import AutoConfig
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from transformers.modeling_outputs import Seq2SeqLMOutput
 from .pooling_encoder import PoolingEncoder
@@ -9,13 +10,18 @@ from torch.nn import CrossEntropyLoss
 
 class MergeBart(BartForConditionalGeneration):
     def __init__(self, encoder_type, load_from, n_contract=1000):
-        default_bart_config = BartConfig()
+        cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
+        #if load_from=='lucadiello/bart-small':
+        #    default_bart_config.max_position_embeddings = 512
+        #    default_bart_config.hidden_size = 512
+        #    default_bart_config.attention_heads = 8
+        #    default_bart_config.encoder_ffn_dim = 2048
         loaded_state_dict = AutoModelForSeq2SeqLM.from_pretrained(load_from).state_dict()
-        default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
-        super().__init__(default_bart_config)
+        #default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
+        super().__init__(cfg)
         if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder(default_bart_config,n_contract)
+            self.model.encoder = SyntacticPoolingEncoder(cfg,n_contract)
         elif encoder_type == 'pool':
             self.model.encoder = PoolingEncoder()
         self.load_state_dict(loaded_state_dict)
@@ -23,6 +29,7 @@ class MergeBart(BartForConditionalGeneration):
 
     def forward(self, input_ids, trees, labels):
         encoder_outputs = self.model.encoder(input_ids, trees)
+        labels = labels[:,:self.tokenizer.model_max_length+1]
         decoder_input_ids = labels[:,:-1]
         labels = labels[:,1:]
         decoder_outputs = self.model.decoder(
@@ -45,7 +52,7 @@ class MergeBart(BartForConditionalGeneration):
         max_len = max(max_len, min_len)
         encoder_outputs = self.model.encoder(input_ids, trees)
         past_key_values = None
-        genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id)]
+        genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id).cuda()]
         while True:
             decoder_outputs = self.model.decoder(
                 input_ids=last_genned[None,None], # make have shape (1,1)

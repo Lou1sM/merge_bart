@@ -54,7 +54,8 @@ class SyntacticPoolingEncoder(BartEncoder):
             running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
             assert unbatched_hidden_states_nop.ndim == 2
             n_toks = unbatched_hidden_states_nop.shape[0]
-            assert ( ( running_span_sizes[-1] == n_toks - 2))
+            if not ( ( running_span_sizes[-1] == n_toks - 2)):
+                breakpoint()
             self.batchify(unbatched_hidden_states_nop) # sets self.hidden_states_nop
             embed_pos = self.embed_positions(self.hidden_states_nop[:,:,-1])
             hidden_states = self.hidden_states_nop + embed_pos
@@ -80,7 +81,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                 unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
             layer_attns = layer_attns[1:-1] # cut off bos and eos
 
-            print(f'layer idx: {idx}\tsum treelengths: {running_span_sizes[-1]}\t hidden_states_nop: {list(unbatched_hidden_states_nop.shape)}\tpadding needed: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
+            print(f'layer {idx}--sum trees: {running_span_sizes[-1]}\t hiddens: {list(unbatched_hidden_states_nop.shape)}\tneeded pad: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
             assert ( ( running_span_sizes[-1] == len(layer_attns)))
             if len(unbatched_hidden_states_nop) > self.seq_len:
                 assert self.contracting
