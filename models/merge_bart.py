@@ -9,7 +9,7 @@ from torch.nn import CrossEntropyLoss
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, encoder_type, load_from, n_contract=1000):
+    def __init__(self, encoder_type, load_from, n_contract=1000, disallow_drops=False, verbose=False):
         cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
         #if load_from=='lucadiello/bart-small':
@@ -21,31 +21,32 @@ class MergeBart(BartForConditionalGeneration):
         #default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
         super().__init__(cfg)
         if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder(cfg,n_contract)
+            self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose)
         elif encoder_type == 'pool':
             self.model.encoder = PoolingEncoder()
         self.load_state_dict(loaded_state_dict)
         self.loss_fct = CrossEntropyLoss()
 
-    def forward(self, input_ids, trees, labels):
+    def forward(self, input_ids, trees, labelss):
         encoder_outputs = self.model.encoder(input_ids, trees)
-        labels = labels[:,:self.tokenizer.model_max_length+1]
-        decoder_input_ids = labels[:,:-1]
-        labels = labels[:,1:]
-        decoder_outputs = self.model.decoder(
-            input_ids=decoder_input_ids,
-            encoder_hidden_states=encoder_outputs[0],
-        )
+        loss = 0
+        for labs in labelss:
+            labs = labs[:,:self.tokenizer.model_max_length+1]
+            decoder_input_ids = labs[:,:-1]
+            labs = labs[:,1:]
+            decoder_outputs = self.model.decoder(
+                input_ids=decoder_input_ids,
+                encoder_hidden_states=encoder_outputs[0],
+            )
 
-        lm_logits = self.lm_head(decoder_outputs[0])
-        lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
+            lm_logits = self.lm_head(decoder_outputs[0])
+            lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
-        masked_lm_loss = None
-        if labels is not None:
-            labels = labels.to(lm_logits.device)
-            masked_lm_loss = self.loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
+            labs = labs.to(lm_logits.device)
+            loss += self.loss_fct(lm_logits.view(-1, self.config.vocab_size), labs.view(-1))
 
-        return Seq2SeqLMOutput(loss=masked_lm_loss,logits=lm_logits)
+        #return Seq2SeqLMOutput(loss=masked_lm_loss,logits=lm_logits)
+        return loss
 
 
     def generate(self, input_ids, trees, min_len=-1, max_len=-1):

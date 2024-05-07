@@ -1,14 +1,11 @@
 import stanza
-from datasets import load_from_disk
 from copy import deepcopy
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import json
 import re
 import torch
 from torch.optim import AdamW
-from models.syntactic_pooling_encoder import SyntacticPoolingEncoder, RootParseNode
+from models.syntactic_pooling_encoder import RootParseNode
 from models.merge_bart import MergeBart
-from contractions import contractions
 from utils import equals_mod_whitespace, rouge_from_multiple_refs, display_rouges
 import argparse
 import pandas as pd
@@ -17,14 +14,19 @@ import string
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--small', action='store_true')
+parser.add_argument('--disallow-drops', action='store_true')
 parser.add_argument('--n-train', type=int, default=3)
 parser.add_argument('--n-test', type=int, default=3)
+parser.add_argument('--n-epochs', type=int, default=1)
+parser.add_argument('--verbose-enc', type=int, default=1)
 ARGS = parser.parse_args()
 
 torch.manual_seed(0)
 
-chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
 nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
+chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
+mb = MergeBart('syn-pool', chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc)
+
 def preproc(input_text):
     trees = []
     # remove '\r\n' when it occurs in the middle of lines, as then parser
@@ -51,48 +53,46 @@ def preproc(input_text):
         trees.append(new_tree)
     return token_ids, trees
 
-def get_model_inputs(epname):
+def get_ss_inputs(epname):
     with open(f'../amazon_video/SummScreen/transcripts/{epname}.json') as f:
         trans_text = '\n'.join(json.load(f)['Transcript'])
 
     with open(f'../amazon_video/SummScreen/summaries/{epname}.json') as f:
-        gt_summs = json.load(f)
+        gt_summ_dict = json.load(f)
 
+    gt_summs = [v for k,v in gt_summ_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
     token_ids, trees = preproc(trans_text)
     return token_ids, trees, gt_summs
 
-#trainset = load_from_disk('../amazon_video/SummScreen/cached_tokenized/nocaptions_test_10dps_train_cache')
-treestrainset = load_from_disk('../amazon_video/SummScreen/cached_tokenized/nocaptions_test_10dps_train_cache')
-#testset = load_from_disk('../amazon_video/SummScreen/cached_tokenized/nocaptions_test_10dps_train_cache')
 df = pd.read_csv('../amazon_video/dset_info.csv', index_col=0)
-trainepnames = df.loc[df['split']=='train'].index
-testepnames = df.loc[df['split']=='test'].index
-mb = MergeBart('syn-pool', chkpt)
+trainepnames = df.loc[df['split']=='train'].index[:ARGS.n_train]
+testepnames = df.loc[df['split']=='test'].index[:ARGS.n_test]
+trainset = [get_ss_inputs(en) for en in trainepnames] # list of (text, tree, list-of-summs)
+testset = [get_ss_inputs(en) for en in testepnames]
 mb.cuda()
-opt = AdamW(mb.parameters(), lr=1e-4)
-for en in trainepnames[:ARGS.n_train]:
+opt = AdamW(mb.parameters(), lr=1e-5)
+for epoch in range(ARGS.n_epochs):
     mb.train()
-    token_ids, trees, gt_summs = get_model_inputs(en)
-    for k, gts in gt_summs.items():
-        if k in ('soapcentral_condensed','tvdb','tvmega_recap'):
-            print(f'training on summ from {k}')
-            gt_toks = torch.tensor(mb.tokenizer(gts).input_ids).cuda()
-            copied_trees = [deepcopy(t) for t in trees]
-            outputs = mb(token_ids, trees=copied_trees, labels=gt_toks.unsqueeze(0))
-            outputs.loss.backward()
-            opt.zero_grad(); opt.step()
+    for token_ids, trees, gt_summs in trainset:
+        labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
+        copied_trees = [deepcopy(t) for t in trees]
+        # train together on all labels for the same input to minimize encoder fwds
+        loss = mb(token_ids, trees=copied_trees, labelss=labelss)
+        loss.backward()
+        print(loss.item())
+        befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
+        opt.step()
+        opt.zero_grad()
+        afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
+        if not ( all([(b!=a).any() for b,a in zip(befores,afters)])):
+            breakpoint()
 with torch.no_grad():
     #mb.eval()
-    for en in testepnames[:ARGS.n_test]:
-        token_ids, trees, gt_summs = get_model_inputs(en)
-        genned = mb.generate(token_ids, trees=trees, min_len=10)
+    for token_ids, trees, ref_summs in testset:
+        copied_trees = [deepcopy(t) for t in trees]
+        genned = mb.generate(token_ids, trees=copied_trees, min_len=10)
         text_pred = mb.tokenizer.decode(genned)
         print(text_pred)
-        refs = [v for k,v in gt_summs.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
-        rs = rouge_from_multiple_refs(text_pred, refs, False, False)
+        rs = rouge_from_multiple_refs(text_pred, ref_summs, False, False)
         for n,val in display_rouges(rs):
             print(f'{n}: {val}')
-    #for nc in [700,900,1100,1300]:
-        #mb.model.encoder.n_contract = 1000
-        #copied_trees = [deepcopy(t) for t in trees]
-        #print(mb.tokenizer.decode(genned, cleanup_special_tokens=True))

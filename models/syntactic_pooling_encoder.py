@@ -13,11 +13,13 @@ nltk.download('punkt')
 
 
 class SyntacticPoolingEncoder(BartEncoder):
-    def __init__(self, cfg, n_contract):
+    def __init__(self, cfg, n_contract, disallow_drops, verbose):
         super().__init__(cfg)
         self.nz = self.config.d_model
         self.seq_len = self.config.max_position_embeddings
         self.n_contract = n_contract
+        self.disallow_drops = disallow_drops
+        self.verbose = verbose
 
     def batchify(self, unbatched_hidden_states_nop):
         self.contracting = len(unbatched_hidden_states_nop) > self.seq_len
@@ -81,7 +83,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                 unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
             layer_attns = layer_attns[1:-1] # cut off bos and eos
 
-            print(f'layer {idx}--sum trees: {running_span_sizes[-1]}\t hiddens: {list(unbatched_hidden_states_nop.shape)}\tneeded pad: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
+            if self.verbose:
+                print(f'layer {idx}--sum trees: {running_span_sizes[-1]}\t hiddens: {list(unbatched_hidden_states_nop.shape)}\tneeded pad: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
             assert ( ( running_span_sizes[-1] == len(layer_attns)))
             if len(unbatched_hidden_states_nop) > self.seq_len:
                 assert self.contracting
@@ -93,10 +96,11 @@ class SyntacticPoolingEncoder(BartEncoder):
                         breakpoint()
                     new_drop_options, new_merge_options = t.determine_drops_and_merges(ac)
                     options += [(tok_idx+d.offset, 'drop', d, dcost, i) for d,dcost in new_drop_options]
-                    options += [(tok_idx+m.offset, 'merge', m, mcost, i) for m,mcost in new_merge_options]
+                    if not self.disallow_drops:
+                        options += [(tok_idx+m.offset, 'merge', m, mcost, i) for m,mcost in new_merge_options]
                     tok_idx += t.span_size
 
-                assert set([x[2].span_size for x in options if x[1]=='drop']) == set([1])
+                assert self.disallow_drops or (set([x[2].span_size for x in options if x[1]=='drop']) == set([1]))
                 n_to_drop = min(self.n_contract, len(unbatched_hidden_states_nop)-self.seq_len+2)
                 reductions = sorted(options, key=lambda x:x[3])[:n_to_drop]
                 reductions = sorted(reductions, key=lambda x:x[0])
@@ -168,7 +172,6 @@ class SyntacticPoolingEncoder(BartEncoder):
         embed_pos = self.embed_positions(final_hidden_states[:,-1])
         final_hidden_states = final_hidden_states + embed_pos
         return BaseModelOutput(last_hidden_state=final_hidden_states)
-        #return final_hidden_states
 
 class RootParseNode():
     def __init__(self, sent, word_toks):
@@ -196,7 +199,7 @@ class RootParseNode():
     def list_droppables(self):
         if self.root=='DROPPED':
             return []
-        return [c for c in self.root.children if c.is_leaf]
+        return [c for c in self.root.children+[self.root] if c.is_leaf]
 
     def determine_drops_and_merges(self, attention_weights):
         possible_drops_costs = [(d, attention_weights[d.offset]) for d in self.list_droppables()]
