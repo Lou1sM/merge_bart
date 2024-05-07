@@ -82,12 +82,12 @@ for en in trainepnames[:ARGS.n_train]:
             outputs.loss.backward()
             opt.zero_grad(); opt.step()
 with torch.no_grad():
-    mb.eval()
+    #mb.eval()
     for en in testepnames[:ARGS.n_test]:
         token_ids, trees, gt_summs = get_model_inputs(en)
         genned = mb.generate(token_ids, trees=trees, min_len=10)
-        print(genned)
         text_pred = mb.tokenizer.decode(genned)
+        print(text_pred)
         refs = [v for k,v in gt_summs.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
         rs = rouge_from_multiple_refs(text_pred, refs, False, False)
         for n,val in display_rouges(rs):

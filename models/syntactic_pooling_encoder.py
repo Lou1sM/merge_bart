@@ -146,6 +146,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                         else:
                             n_to_exclude_after = node.span_size-1
                             what_red_should_be = n_to_exclude_after
+
                             node.merge()
                             merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after]).sum(0)/layer_attns[i:i+n_to_exclude_after].sum()
                             reduced_hiddens.append(merged)
@@ -189,7 +190,8 @@ class RootParseNode():
         return self.root.descendents
 
     def list_mergables(self):
-        return [n for n in self.descendents if not n.is_leaf and n.child_idx==0 and all(c.is_leaf for c in n.children)]
+        #return [n for n in self.descendents if not n.is_leaf and n.child_idx==0 and all(c.is_leaf for c in n.children)]
+        return [n for n in self.descendents if not n.is_leaf and all(c.is_leaf for c in n.children)]
 
     def list_droppables(self):
         if self.root=='DROPPED':
@@ -253,9 +255,9 @@ class ParseNode():
                 #print(f'pw: {"".join(pw_chunk)}\ttoks: {"".join(tok_chunk)}\tpwspan: {pw_span}\ttokspan: {tok_span}\tpwstart: {pw_start}\ttokstart: {tok_start}')
                 if equals_mod_whitespace(''.join(pw_chunk), ''.join(tok_chunk)):
                     break
-                elif len(''.join(pw_chunk).strip()) > len(''.join(tok_chunk).strip()): #normal way
+                elif len(''.join(pw_chunk).replace(' ','').replace('\n','')) > len(''.join(tok_chunk).replace(' ','').replace('\n','')): #normal way
                     tok_span += 1
-                elif len(''.join(tok_chunk).strip()) > len(''.join(pw_chunk).strip()): #weird way
+                elif len(''.join(tok_chunk).replace(' ','').replace('\n','')) > len(''.join(pw_chunk).replace(' ','').replace('\n','')): #weird way
                     pw_span += 1
                 else: # shouldn't happen
                     breakpoint()
