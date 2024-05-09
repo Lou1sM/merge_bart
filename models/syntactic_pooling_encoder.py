@@ -1,5 +1,5 @@
 from transformers.models.bart.modeling_bart import BartEncoder
-from utils import text_from_node_or_str, equals_mod_whitespace
+from utils import text_from_node_or_str, equals_mod_whitespace, TreeError
 import re
 import math
 import torch
@@ -209,6 +209,11 @@ class RootParseNode():
     def merge_cost(self, merge_attns): #may also want to consider attn mergees have for each other
         return merge_attns @ (1-merge_attns/merge_attns.sum())
 
+class FlatRootParseNode(RootParseNode):
+    def __init__(self, sent, word_toks):
+        self.parse = 'flatroothasnoparse'
+        self.root = ParseNode(sent.text, self, word_toks, 0)
+        assert len(self.root.children) == len(word_toks)
 
 class ParseNode():
     def __init__(self, stanza_node_or_text, parent, word_toks, child_idx):
@@ -258,15 +263,23 @@ class ParseNode():
                 #print(f'pw: {"".join(pw_chunk)}\ttoks: {"".join(tok_chunk)}\tpwspan: {pw_span}\ttokspan: {tok_span}\tpwstart: {pw_start}\ttokstart: {tok_start}')
                 if equals_mod_whitespace(''.join(pw_chunk), ''.join(tok_chunk)):
                     break
-                elif len(''.join(pw_chunk).replace(' ','').replace('\n','')) > len(''.join(tok_chunk).replace(' ','').replace('\n','')): #normal way
+                elif len(re.sub(r'[\n\r\t ]', '', ''.join(pw_chunk))) > len(re.sub(r'[\n\r\t ]', '', ''.join(tok_chunk))): #normal way
                     tok_span += 1
-                elif len(''.join(tok_chunk).replace(' ','').replace('\n','')) > len(''.join(pw_chunk).replace(' ','').replace('\n','')): #weird way
+                elif len(re.sub(r'[\n\r\t ]', '', ''.join(tok_chunk))) > len(re.sub(r'[\n\r\t ]', '', ''.join(pw_chunk))): #weird way
                     pw_span += 1
                 else: # shouldn't happen
-                    breakpoint()
+                    print('equal lens but no match for', ' '.join(parse_words))
+                    print(' '.join(parse_words))
+                    with open('mistakes.txt', 'a') as f:
+                        f.write(' '.join(parse_words) + '\n')
+                    raise TreeError
 
-                if max(pw_span,tok_span)>300:
-                    breakpoint()
+                #if max(pw_span,tok_span)>300:
+                if pw_span > len(parse_words) or tok_span > len(toks_to_iter):
+                    print('didn\'t find a match for', ' '.join(parse_words))
+                    with open('mistakes.txt', 'a') as f:
+                        f.write(' '.join(parse_words) + '\n')
+                    raise TreeError
             if pw_span > tok_span:
                 print(f'matching multiple syntax nodes to a single token, {tok_chunk} matched to {parse_words[pw_start:pw_start+pw_span]}')
             child_toks.append(tok_chunk)

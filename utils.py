@@ -27,6 +27,14 @@ def text_from_node_or_str(x):
         joined_terminals = ' '.join([str(n)[1:-1].split()[1] for n in x.yield_preterminals()])
         text = joined_terminals.replace(' , ',', ').replace(' ; ','; ').replace(' . ','. ').replace(' " ','" ')
         text = re.sub(r'\" (\w+) \"',r'"\1"',joined_terminals) # remove space around "
+        text = text.replace('-LRB-', '(').replace('-RRB-', ')')
+        text = text.replace('hypotheticalls', 'hypotheticals') # seems to be a mistake in stanza
+        text = text.replace('Confidentiall ', 'Confidential ') # seems to be a mistake in stanza
+        text = text.replace('Statesvilele ', 'Statesville ') # seems to be a mistake in stanza
+        text = text.replace('Responssbiitity', 'Responsibility') # seems to be a mistake in stanza
+        text = text.replace('C<UNK>E<UNK>O<UNK><UNK>s', 'C.E.O.s') # seems to be a mistake in stanza
+        text = text.replace('A<UNK>B<UNK>G<UNK><UNK>s', 'A.B.G.s') # seems to be a mistake in stanza
+        text = text.replace('\'l ', '\'ll ') # seems to be a mistake in stanza
         return text
 
 def match_word_toks_to_sents(word_toks, sents):
@@ -46,10 +54,11 @@ def strip_equals(s1,s2):
 def equals_mod_whitespace(s_pred, s_target):
     s_pred = s_pred.replace(' ','')
     s_target = s_target.replace(' ','')
-    if s_target.replace('\n','') == '' or s_pred.replace('\n','') == '': # don't match pred '' with target '\n\n'
+    if (stripped_t:=re.sub(r'[\t\n\r]','',s_target)) == '' or \
+       (stripped_p:=re.sub(r'[\t\n\r]','',s_pred)) == '': # don't match pred '' with target '\n\n'
         return s_pred == s_target
     else:
-        return s_pred.replace('\n','') == s_target.replace('\n','')
+        return stripped_t == stripped_p
 
 rouge_eval = rouge.Rouge(metrics=['rouge-n', 'rouge-l'],
                                                  max_n=2,
@@ -161,3 +170,5 @@ def split_text_by_sep(text,sep):
     assert first_chunk+second_chunk == text
     return first_chunk, second_chunk
 
+class TreeError(Exception):
+    pass
