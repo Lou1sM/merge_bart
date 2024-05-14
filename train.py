@@ -1,17 +1,16 @@
 import stanza
+from datasets import load_dataset
 from tqdm import tqdm
 import os
 import pickle
 from copy import deepcopy
-import json
 import re
 import torch
 from torch.optim import AdamW
 from models.syntactic_pooling_encoder import RootParseNode, FlatRootParseNode
 from models.merge_bart import MergeBart
-from utils import equals_mod_whitespace, rouge_from_multiple_refs, display_rouges, TreeError
+from utils import rouge_from_multiple_refs, display_rouges, TreeError
 import argparse
-import pandas as pd
 import string
 
 
@@ -40,22 +39,11 @@ def preproc(input_text):
     input_text = re.sub(r'\r\n(?!(\[|[A-Z][a-z]*: ))', '', input_text)
     input_text = input_text.replace('\r\n','\n').replace('\n\r','\n')
     input_text = ''.join(c for c in input_text if c in string.printable)
-    #token_ids = torch.tensor(mb.tokenizer(input_text)['input_ids']).cuda()
-    #remaining_word_toks = [mb.tokenizer.decode(t) for t in mb.tokenizer(input_text,add_special_tokens=False).input_ids]
     token_ids = [mb.tokenizer.bos_token_id]
     assert 'Ġ' not in input_text
     assert 'Ċ' not in input_text
     doc = nlp(input_text)
     for i,sent in enumerate(doc.sentences):
-        #word_toks_to_match = ''
-        #matching_word_toks = []
-        #while not equals_mod_whitespace(word_toks_to_match, sent.text):
-        #    if len(word_toks_to_match.strip())>len(sent.text.strip()):
-        #        print(word_toks_to_match.strip(),sent.text.strip())
-        #        breakpoint()
-        #    new = remaining_word_toks.pop(0)
-        #    word_toks_to_match += new
-        #    matching_word_toks.append(new)
 
         matching_toks = mb.tokenizer(sent.text,add_special_tokens=False).input_ids
         matching_word_toks = [mb.tokenizer.decode(t) for t in matching_toks]
@@ -73,30 +61,24 @@ def preproc(input_text):
     assert sum(t.span_size for t in trees) == len(token_ids) - 2
     return token_ids, trees
 
-def get_ss_inputs(epname):
-    with open(f'../amazon_video/SummScreen/transcripts/{epname}.json') as f:
-        trans_text = '\n'.join(json.load(f)['Transcript'])
-
-    with open(f'../amazon_video/SummScreen/summaries/{epname}.json') as f:
-        gt_summ_dict = json.load(f)
-
-    gt_summs = [v for k,v in gt_summ_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
-    token_ids, trees = preproc(trans_text)
+def get_ss_inputs(dpoint_dict):
+    breakpoint()
+    gt_summs = [v for k,v in dpoint_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
+    token_ids, trees = preproc('\n'.join(dpoint_dict['Transcript']))
     return token_ids, trees, gt_summs
 
 dset = {}
+raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
 for split in ['train', 'test']:
-    if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set.pkl'):
+    n = ARGS.n_train if split=='train' else ARGS.n_test
+    if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set-{n}dpoints.pkl'):
         print(f'Computing {split}set from scratch')
-        df = pd.read_csv('../amazon_video/dset_info.csv', index_col=0)
-        n = ARGS.n_train if split=='train' else ARGS.n_test
-        splitepnames = df.loc[df['split']==split].index[:n]
-        dset[split] = [get_ss_inputs(en) for en in splitepnames]
-        with open(f'datasets/{split}set.pkl', 'wb') as f:
+        dset[split] = [get_ss_inputs(raw_dset[split][i]) for i in range(n)]
+        with open(f'datasets/{split}set-{n}dpoints.pkl', 'wb') as f:
             pickle.dump(dset[split], f)
     else:
         print(f'Loading {split}set')
-        with open(f'datasets/{split}set.pkl', 'rb') as f:
+        with open(f'datasets/{split}set-{n}dpoints.pkl', 'rb') as f:
             dset[split] = pickle.load(f)
 mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
