@@ -5,3 +5,4 @@ pip install datasets
 pip install stanza
 pip install py-rouge
 pip install nltk
+pip install dl-utils385

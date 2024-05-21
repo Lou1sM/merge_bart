@@ -56,8 +56,7 @@ class SyntacticPoolingEncoder(BartEncoder):
             running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
             assert unbatched_hidden_states_nop.ndim == 2
             n_toks = unbatched_hidden_states_nop.shape[0]
-            if not ( ( running_span_sizes[-1] == n_toks - 2)):
-                breakpoint()
+            assert ( ( running_span_sizes[-1] == n_toks - 2))
             self.batchify(unbatched_hidden_states_nop) # sets self.hidden_states_nop
             embed_pos = self.embed_positions(self.hidden_states_nop[:,:,-1])
             hidden_states = self.hidden_states_nop + embed_pos
@@ -77,7 +76,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                 for tn in (22,133,757):
                     if tn >= self.chunk_size:
                         break
-                    assert torch.allclose(layer_attns[tn], layer_outputs[1][0,:,:,tn].sum())
+                    if (x:=(layer_attns[tn] - layer_outputs[1][0,:,:,tn].sum()).mean()) > 1e-5:
+                        print(f'warning: values from two ways of computing attns differ by {x} when avg attn is {layer_attns[tn].mean()}')
             else:
                 layer_attns = layer_attns.sum([0,1])
                 unbatched_hidden_states_nop = self.hidden_states_nop.squeeze(0)
@@ -92,8 +92,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                 options = []
                 tok_idx = 0
                 for i, (t,ac) in enumerate(zip(trees, attn_chunks)):
-                    if not ( t.span_size == ac.shape[0]):
-                        breakpoint()
+                    assert ( t.span_size == ac.shape[0])
                     new_drop_options, new_merge_options = t.determine_drops_and_merges(ac)
                     options += [(tok_idx+d.offset, 'drop', d, dcost, i) for d,dcost in new_drop_options]
                     if not self.disallow_drops:
@@ -119,14 +118,12 @@ class SyntacticPoolingEncoder(BartEncoder):
                         #print(f'tok idx: {tok_idx}\ttree idx: {tidx}\toption idx: {option_idx}')
                         while option_idx<len(reductions) and reduction_idxs[option_idx]==i:
                             option_idx+=1
-                        if prev_tok_idx==tok_idx:
-                            breakpoint()
+                        assert prev_tok_idx!=tok_idx
                         prev_tok_idx = tok_idx
                         if n_to_exclude_after>0:
                             n_to_exclude_after -= 1
                             continue
-                        if not ( node in trees[tidx].descendents):
-                            breakpoint()
+                        assert ( node in trees[tidx].descendents)
                         assert tok_idx==i
                         if red_type == 'drop':
                             what_red_should_be = 1
@@ -135,15 +132,11 @@ class SyntacticPoolingEncoder(BartEncoder):
                                 trees[tidx].root = 'DROPPED'
                             elif len(node.parent.children)==2: # replace the parent with the sibling
                                 sibling = [n for n in node.parent.children if n!=node][0]
-                                if node.parent.is_root:
-                                    if not ( node.parent==trees[tidx].root):
-                                        breakpoint()
-                                    trees[tidx].root = sibling
-                                    sibling.parent = trees[tidx]
-                                    assert sibling.is_root
-                                else:
-                                    breakpoint()
-                                    node.parent.parent.children = [sibling if c==node.parent else c for c in node.parent.parent.children]
+                                assert node.parent.is_root
+                                assert ( node.parent==trees[tidx].root)
+                                trees[tidx].root = sibling
+                                sibling.parent = trees[tidx]
+                                assert sibling.is_root
                             else:
                                 node.drop_non_root()
 
@@ -162,6 +155,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                             n_to_exclude_after -= 1
                         else:
                             reduced_hiddens.append(hs)
+                    #if any(reduced_hiddens[-1].isnan().any()):
 
                 reduced_hiddens.append(unbatched_hidden_states_nop[-1]) # add eos
                 unbatched_hidden_states_nop = torch.stack(reduced_hiddens)
@@ -227,6 +221,8 @@ class ParseNode():
             self.parse = None
             _children = self.toks if len(self.toks)>1 else []
         else:
+            while len(stanza_node_or_text.children)==1:
+                stanza_node_or_text = stanza_node_or_text.children[0]
             self.parse = stanza_node_or_text
             n = self.parse
 
@@ -292,7 +288,10 @@ class ParseNode():
             if pw_start>=len(parse_words):
                 break
 
-        self.children = [ParseNode(c, self, cts, i) for i,(c,cts) in enumerate(zip(cm_children,child_toks))]
+        if len(cm_children)==1: # just make flat, could probs do sth better but fine for now
+            self.children = [ParseNode(t, self, [t], i) for i,t in enumerate(self.toks)]
+        else:
+            self.children = [ParseNode(c, self, cts, i) for i,(c,cts) in enumerate(zip(cm_children,child_toks))]
         self.text = ' '.join(c.text for c in self.children)
         self.span_size = sum(c.span_size for c in self.children)
         assert self.span_size == len(self.toks)

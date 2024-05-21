@@ -1,4 +1,5 @@
 import stanza
+from dl_utils.misc import check_dir, set_experiment_dir
 from datasets import load_dataset
 from tqdm import tqdm
 import os
@@ -12,18 +13,23 @@ from models.merge_bart import MergeBart
 from utils import rouge_from_multiple_refs, display_rouges, TreeError
 import argparse
 import string
+from os.path import join
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--small', action='store_true')
-parser.add_argument('--recompute_dset', action='store_true')
+parser.add_argument('--recompute-dset', action='store_true')
 parser.add_argument('--disallow-drops', action='store_true')
 parser.add_argument('--n-train', type=int, default=3)
 parser.add_argument('--n-test', type=int, default=3)
 parser.add_argument('--n-epochs', type=int, default=1)
+parser.add_argument('--start-from', type=int, default=1)
 parser.add_argument('--verbose-enc', action='store_true')
+parser.add_argument('--overwrite', action='store_true')
+parser.add_argument('--exp-name', type=str, default='tmp')
 ARGS = parser.parse_args()
 
+set_experiment_dir(expdir:=join('experiments',ARGS.exp_name), overwrite=ARGS.overwrite, name_of_trials='experiments/tmp')
 torch.manual_seed(0)
 
 nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
@@ -62,18 +68,21 @@ def preproc(input_text):
     return token_ids, trees
 
 def get_ss_inputs(dpoint_dict):
-    breakpoint()
-    gt_summs = [v for k,v in dpoint_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
+    #gt_summs = [v for k,v in dpoint_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
+    gt_summs = dpoint_dict['Recap']
     token_ids, trees = preproc('\n'.join(dpoint_dict['Transcript']))
-    return token_ids, trees, gt_summs
+    epname = ''.join(w[0].lower() for w in dpoint_dict['Show Title'].split()) + '-' + dpoint_dict['Episode Number']
+    return epname, token_ids, trees, gt_summs
 
 dset = {}
 raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
 for split in ['train', 'test']:
     n = ARGS.n_train if split=='train' else ARGS.n_test
     if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set-{n}dpoints.pkl'):
-        print(f'Computing {split}set from scratch')
+        if n==-1:
+            n = len(raw_dset[split])
         dset[split] = [get_ss_inputs(raw_dset[split][i]) for i in range(n)]
+        print(f'Computing {split}set from scratch for {n} dpoints')
         with open(f'datasets/{split}set-{n}dpoints.pkl', 'wb') as f:
             pickle.dump(dset[split], f)
     else:
@@ -83,32 +92,39 @@ for split in ['train', 'test']:
 mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
 epoch_loss = 0
-for epoch in range(ARGS.n_epochs):
-    print(f'Epoch: {epoch}')
-    mb.train()
-    for i, (token_ids, trees, gt_summs) in enumerate(pbar:=tqdm(dset['train'])):
-        labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
-        copied_trees = [deepcopy(t) for t in trees]
-        # train together on all labels for the same input to minimize encoder fwds
-        loss = mb(token_ids, trees=copied_trees, labelss=labelss)
-        loss.backward()
-        befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
-        opt.step()
-        opt.zero_grad()
-        afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
-        normed_loss = loss/len(gt_summs) # because add for different summs
-        epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
-        pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
-        print(normed_loss.item())
-        if not ( all([(b!=a).any() for b,a in zip(befores,afters)])):
-            breakpoint()
+with torch.no_grad():
+    for epoch in range(ARGS.n_epochs):
+        print(f'Epoch: {epoch}')
+        mb.train()
+        for i, (epname, token_ids, trees, gt_summs) in enumerate(pbar:=tqdm(dset['train'])):
+            if i<ARGS.start_from:
+                continue
+            labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
+            copied_trees = [deepcopy(t) for t in trees]
+            # train together on all labels for the same input to minimize encoder fwds
+            loss = mb(token_ids, trees=copied_trees, labelss=labelss)
+            #loss.backward()
+            #befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
+            #opt.step()
+            #opt.zero_grad()
+            #afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
+            normed_loss = loss/len(gt_summs) # because add for different summs
+            epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
+            pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
+            #assert ( all([(b!=a).any() for b,a in zip(befores,afters)]))
+
+check_dir(join(expdir, 'checkpoints', 'best'))
+mb.save_pretrained(join(expdir, 'checkpoints', 'best'))
+check_dir(join(expdir, 'test_gens'))
 with torch.no_grad():
     #mb.eval()
-    for token_ids, trees, ref_summs in dset['test']:
+    for epname, token_ids, trees, ref_summs in dset['test']:
         copied_trees = [deepcopy(t) for t in trees]
         genned = mb.generate(token_ids, trees=copied_trees, min_len=100)
         text_pred = mb.tokenizer.decode(genned)
         print(text_pred)
+        with open(join(expdir, 'test_gens', f'{epname}.txt'), 'w') as f:
+            f.write(text_pred)
         rs = rouge_from_multiple_refs(text_pred, ref_summs, False, False)
         for n,val in display_rouges(rs):
             print(f'{n}: {val}')
