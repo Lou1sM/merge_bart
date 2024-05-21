@@ -46,7 +46,7 @@ class SyntacticPoolingEncoder(BartEncoder):
         else:
             assert input_ids.ndim==1
 
-        inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
+        inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
 
         unbatched_hidden_states_nop = inputs_embeds #'nop' means no pos embeds, for now
         unbatched_hidden_states_nop = self.layernorm_embedding(unbatched_hidden_states_nop)
