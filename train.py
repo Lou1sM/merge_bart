@@ -26,14 +26,17 @@ parser.add_argument('--n-epochs', type=int, default=1)
 parser.add_argument('--start-from', type=int, default=1)
 parser.add_argument('--verbose-enc', action='store_true')
 parser.add_argument('--overwrite', action='store_true')
-parser.add_argument('--exp-name', type=str, default='tmp')
+parser.add_argument('--expname', type=str, default='tmp')
+parser.add_argument('--reload-from', type=str)
 ARGS = parser.parse_args()
 
-set_experiment_dir(expdir:=join('experiments',ARGS.exp_name), overwrite=ARGS.overwrite, name_of_trials='experiments/tmp')
+set_experiment_dir(expdir:=join('experiments',ARGS.expname), overwrite=ARGS.overwrite, name_of_trials='experiments/tmp')
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
 mb = MergeBart('syn-pool', chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc)
+if ARGS.reload_from is not None:
+    mb.load_state_dict(torch.load(join('experiments', ARGS.reload_from, 'checkpoints','latest.pt')))
 failed = 0
 
 def preproc(input_text):
@@ -92,7 +95,7 @@ for split in ['train', 'test']:
 mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
 epoch_loss = 0
-#with torch.no_grad():
+check_dir(chkpt_dir:=join(expdir, 'checkpoints'))
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}')
     mb.train()
@@ -111,10 +114,10 @@ for epoch in range(ARGS.n_epochs):
         normed_loss = loss.item()/len(gt_summs) # because add for different summs
         epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
         pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
+        torch.save(mb.state_dict(), join(chkpt_dir, 'latest.pt'))
         #assert ( all([(b!=a).any() for b,a in zip(befores,afters)]))
 
-check_dir(join(expdir, 'checkpoints', 'best'))
-mb.save_pretrained(join(expdir, 'checkpoints', 'best'))
+torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
 check_dir(join(expdir, 'test_gens'))
 with torch.no_grad():
     #mb.eval()
