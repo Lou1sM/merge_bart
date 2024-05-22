@@ -32,7 +32,6 @@ ARGS = parser.parse_args()
 set_experiment_dir(expdir:=join('experiments',ARGS.exp_name), overwrite=ARGS.overwrite, name_of_trials='experiments/tmp')
 torch.manual_seed(0)
 
-nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
 mb = MergeBart('syn-pool', chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc)
 failed = 0
@@ -79,6 +78,7 @@ raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
 for split in ['train', 'test']:
     n = ARGS.n_train if split=='train' else ARGS.n_test
     if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set-{n}dpoints.pkl'):
+        nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
         if n==-1:
             n = len(raw_dset[split])
         dset[split] = [get_ss_inputs(raw_dset[split][i]) for i in range(n)]
@@ -103,12 +103,12 @@ for epoch in range(ARGS.n_epochs):
         copied_trees = [deepcopy(t) for t in trees]
         # train together on all labels for the same input to minimize encoder fwds
         loss = mb(token_ids, trees=copied_trees, labelss=labelss)
-        #loss.backward()
+        loss.backward()
         #befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
-        #opt.step()
-        #opt.zero_grad()
+        opt.step()
+        opt.zero_grad()
         #afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
-        normed_loss = loss/len(gt_summs) # because add for different summs
+        normed_loss = loss.item()/len(gt_summs) # because add for different summs
         epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
         pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
         #assert ( all([(b!=a).any() for b,a in zip(befores,afters)]))
