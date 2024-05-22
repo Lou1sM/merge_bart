@@ -92,26 +92,26 @@ for split in ['train', 'test']:
 mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
 epoch_loss = 0
-with torch.no_grad():
-    for epoch in range(ARGS.n_epochs):
-        print(f'Epoch: {epoch}')
-        mb.train()
-        for i, (epname, token_ids, trees, gt_summs) in enumerate(pbar:=tqdm(dset['train'])):
-            if i<ARGS.start_from:
-                continue
-            labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
-            copied_trees = [deepcopy(t) for t in trees]
-            # train together on all labels for the same input to minimize encoder fwds
-            loss = mb(token_ids, trees=copied_trees, labelss=labelss)
-            #loss.backward()
-            #befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
-            #opt.step()
-            #opt.zero_grad()
-            #afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
-            normed_loss = loss/len(gt_summs) # because add for different summs
-            epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
-            pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
-            #assert ( all([(b!=a).any() for b,a in zip(befores,afters)]))
+#with torch.no_grad():
+for epoch in range(ARGS.n_epochs):
+    print(f'Epoch: {epoch}')
+    mb.train()
+    for i, (epname, token_ids, trees, gt_summs) in enumerate(pbar:=tqdm(dset['train'])):
+        if i<ARGS.start_from:
+            continue
+        labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
+        copied_trees = [deepcopy(t) for t in trees]
+        # train together on all labels for the same input to minimize encoder fwds
+        loss = mb(token_ids, trees=copied_trees, labelss=labelss)
+        #loss.backward()
+        #befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
+        #opt.step()
+        #opt.zero_grad()
+        #afters = [p.detach().cpu().clone() for p in mb.model.parameters()]
+        normed_loss = loss/len(gt_summs) # because add for different summs
+        epoch_loss = (i*epoch_loss + normed_loss)/(i+1)
+        pbar.set_description(f'loss: {normed_loss:.3f} epoch loss: {epoch_loss:.3f}')
+        #assert ( all([(b!=a).any() for b,a in zip(befores,afters)]))
 
 check_dir(join(expdir, 'checkpoints', 'best'))
 mb.save_pretrained(join(expdir, 'checkpoints', 'best'))
