@@ -81,10 +81,14 @@ raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
 for split in ['train', 'test']:
     n = ARGS.n_train if split=='train' else ARGS.n_test
     if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set-{n}dpoints.pkl'):
-        nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
+        if 'nlp' not in locals().keys():
+            nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
         if n==-1:
             n = len(raw_dset[split])
-        dset[split] = [get_ss_inputs(raw_dset[split][i]) for i in range(n)]
+        dset[split] = []
+        print(f'Computing trees for {split}set')
+        for i in tqdm(range(n)):
+            dset[split].append(get_ss_inputs(raw_dset[split][i]))
         print(f'Computing {split}set from scratch for {n} dpoints')
         with open(f'datasets/{split}set-{n}dpoints.pkl', 'wb') as f:
             pickle.dump(dset[split], f)

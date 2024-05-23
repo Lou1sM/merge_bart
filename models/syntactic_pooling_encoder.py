@@ -276,8 +276,8 @@ class ParseNode():
                     with open('mistakes.txt', 'a') as f:
                         f.write(' '.join(parse_words) + '\n')
                     raise TreeError
-            if pw_span > tok_span:
-                print(f'matching multiple syntax nodes to a single token, {tok_chunk} matched to {parse_words[pw_start:pw_start+pw_span]}')
+            #if pw_span > tok_span:
+                #print(f'matching multiple syntax nodes to a single token, {tok_chunk} matched to {parse_words[pw_start:pw_start+pw_span]}')
             child_toks.append(tok_chunk)
             cm_children.append(''.join(pw_chunk))
             pw_start += pw_span
