@@ -26,6 +26,7 @@ parser.add_argument('--n-epochs', type=int, default=1)
 parser.add_argument('--start-from', type=int, default=1)
 parser.add_argument('--verbose-enc', action='store_true')
 parser.add_argument('--overwrite', action='store_true')
+parser.add_argument('--no-trees', action='store_true')
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
 ARGS = parser.parse_args()
@@ -69,10 +70,14 @@ def preproc(input_text):
     assert sum(t.span_size for t in trees) == len(token_ids) - 2
     return token_ids, trees
 
-def get_ss_inputs(dpoint_dict):
+def get_ss_inputs(dpoint_dict, use_trees):
     #gt_summs = [v for k,v in dpoint_dict.items() if k in ('soapcentral_condensed','tvdb','tvmega_recap')]
     gt_summs = dpoint_dict['Recap']
-    token_ids, trees = preproc('\n'.join(dpoint_dict['Transcript']))
+    if use_trees:
+        token_ids, trees = preproc('\n'.join(dpoint_dict['Transcript']))
+    else:
+        token_ids = torch.tensor(mb.tokenizer('\n'.join(dpoint_dict['Transcript']))['input_ids']).cuda()
+        trees = None
     epname = ''.join(w[0].lower() for w in dpoint_dict['Show Title'].split()) + '-' + dpoint_dict['Episode Number']
     return epname, token_ids, trees, gt_summs
 
@@ -80,21 +85,22 @@ dset = {}
 raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
 for split in ['train', 'test']:
     n = ARGS.n_train if split=='train' else ARGS.n_test
-    if ARGS.recompute_dset or not os.path.exists(f'datasets/{split}set-{n}dpoints.pkl'):
-        if 'nlp' not in locals().keys():
+    if n==-1:
+        n = len(raw_dset[split])
+    dset_fpath = f'datasets/{split}set-{n}dpoints-treeless.pkl' if ARGS.no_trees else f'datasets/{split}set-{n}dpoints.pkl'
+    if ARGS.recompute_dset or not os.path.exists(dset_fpath):
+        if not ARGS.no_trees and 'nlp' not in locals().keys():
             nlp = stanza.Pipeline(lang='en', processors='tokenize,pos,constituency')
-        if n==-1:
-            n = len(raw_dset[split])
         dset[split] = []
         print(f'Computing trees for {split}set')
         for i in tqdm(range(n)):
-            dset[split].append(get_ss_inputs(raw_dset[split][i]))
+            dset[split].append(get_ss_inputs(raw_dset[split][i], not ARGS.no_trees))
         print(f'Computing {split}set from scratch for {n} dpoints')
-        with open(f'datasets/{split}set-{n}dpoints.pkl', 'wb') as f:
+        with open(dset_fpath, 'wb') as f:
             pickle.dump(dset[split], f)
     else:
         print(f'Loading {split}set')
-        with open(f'datasets/{split}set-{n}dpoints.pkl', 'rb') as f:
+        with open(dset_fpath, 'rb') as f:
             dset[split] = pickle.load(f)
 mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
@@ -107,7 +113,7 @@ for epoch in range(ARGS.n_epochs):
         if i<ARGS.start_from:
             continue
         labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
-        copied_trees = [deepcopy(t) for t in trees]
+        copied_trees = trees if ARGS.no_trees else [deepcopy(t) for t in trees]
         # train together on all labels for the same input to minimize encoder fwds
         loss = mb(token_ids, trees=copied_trees, labelss=labelss)
         loss.backward()
@@ -126,7 +132,7 @@ check_dir(join(expdir, 'test_gens'))
 with torch.no_grad():
     #mb.eval()
     for epname, token_ids, trees, ref_summs in dset['test']:
-        copied_trees = [deepcopy(t) for t in trees]
+        copied_trees = trees if ARGS.no_trees else [deepcopy(t) for t in trees]
         genned = mb.generate(token_ids, trees=copied_trees, min_len=100)
         text_pred = mb.tokenizer.decode(genned)
         print(text_pred)

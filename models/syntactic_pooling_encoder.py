@@ -53,10 +53,13 @@ class SyntacticPoolingEncoder(BartEncoder):
         unbatched_hidden_states_nop = nn.functional.dropout(unbatched_hidden_states_nop, p=self.dropout, training=self.training)
 
         for idx, encoder_layer in enumerate(self.layers):
-            running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
             assert unbatched_hidden_states_nop.ndim == 2
             n_toks = unbatched_hidden_states_nop.shape[0]
-            assert ( ( running_span_sizes[-1] == n_toks - 2))
+            if trees is not None:
+                running_span_sizes = [sum(t.span_size for t in trees[:i]) for i in range(len(trees)+1)]
+                assert ( ( running_span_sizes[-1] == n_toks - 2))
+            else:
+                running_span_sizes = None
             self.batchify(unbatched_hidden_states_nop) # sets self.hidden_states_nop
             embed_pos = self.embed_positions(self.hidden_states_nop[:,:,-1])
             hidden_states = self.hidden_states_nop + embed_pos
@@ -85,80 +88,17 @@ class SyntacticPoolingEncoder(BartEncoder):
 
             if self.verbose:
                 print(f'layer {idx}--sum trees: {running_span_sizes[-1]}\t hiddens: {list(unbatched_hidden_states_nop.shape)}\tneeded pad: {self.padding_needed}\tattns: {list(layer_attns.shape)}\tpseudo-batchsize: {self.pseudo_batch_size}\tchunksize: {self.chunk_size}\tcontracting: {self.contracting}')
-            assert ( ( running_span_sizes[-1] == len(layer_attns)))
+            assert ( ( n_toks-2 == len(layer_attns)))
             if len(unbatched_hidden_states_nop) > self.seq_len:
                 assert self.contracting
-                attn_chunks = [layer_attns[running_span_sizes[i]:running_span_sizes[i+1]] for i in range(len(trees))]
-                options = []
-                tok_idx = 0
-                for i, (t,ac) in enumerate(zip(trees, attn_chunks)):
-                    assert ( t.span_size == ac.shape[0])
-                    new_drop_options, new_merge_options = t.determine_drops_and_merges(ac)
-                    options += [(tok_idx+d.offset, 'drop', d, dcost, i) for d,dcost in new_drop_options]
-                    if not self.disallow_drops:
-                        options += [(tok_idx+m.offset, 'merge', m, mcost, i) for m,mcost in new_merge_options]
-                    tok_idx += t.span_size
-
-                assert self.disallow_drops or (set([x[2].span_size for x in options if x[1]=='drop']) == set([1]))
                 n_to_drop = min(self.n_contract, len(unbatched_hidden_states_nop)-self.seq_len+2)
-                reductions = sorted(options, key=lambda x:x[3])[:n_to_drop]
-                reductions = sorted(reductions, key=lambda x:x[0])
-                reduction_idxs = [x[0] for x in reductions]
-                reduced_hiddens = [unbatched_hidden_states_nop[0]] # start with just bos, will add others in for loop
-                hidden_states_nop_inner = unbatched_hidden_states_nop[1:-1] # drop bos/eos
-                n_to_exclude_after = 0
-                option_idx = 0
-                ts = lambda: sum(t.span_size for t in trees)
-                prev = ts()
-                assert prev==running_span_sizes[-1]
-                prev_tok_idx = -1
-                for i, hs in enumerate(hidden_states_nop_inner):
-                    if i in reduction_idxs:
-                        tok_idx, red_type, node, _, tidx = reductions[option_idx]
-                        #print(f'tok idx: {tok_idx}\ttree idx: {tidx}\toption idx: {option_idx}')
-                        while option_idx<len(reductions) and reduction_idxs[option_idx]==i:
-                            option_idx+=1
-                        assert prev_tok_idx!=tok_idx
-                        prev_tok_idx = tok_idx
-                        if n_to_exclude_after>0:
-                            n_to_exclude_after -= 1
-                            continue
-                        assert ( node in trees[tidx].descendents)
-                        assert tok_idx==i
-                        if red_type == 'drop':
-                            what_red_should_be = 1
-                            if node.is_root:
-                                assert trees[tidx].root==node
-                                trees[tidx].root = 'DROPPED'
-                            elif len(node.parent.children)==2: # replace the parent with the sibling
-                                sibling = [n for n in node.parent.children if n!=node][0]
-                                assert node.parent.is_root
-                                assert ( node.parent==trees[tidx].root)
-                                trees[tidx].root = sibling
-                                sibling.parent = trees[tidx]
-                                assert sibling.is_root
-                            else:
-                                node.drop_non_root()
+                if trees is None:
+                    reduction_idxs = (-layer_attns).topk(len(layer_attns)-n_to_drop).indices
+                    inner = unbatched_hidden_states_nop[1:-1][reduction_idxs]
+                    unbatched_hidden_states_nop = torch.cat([unbatched_hidden_states_nop[:1], inner, unbatched_hidden_states_nop[-1:]])
+                    continue
 
-                        else:
-                            n_to_exclude_after = node.span_size-1
-                            what_red_should_be = n_to_exclude_after
-
-                            node.merge()
-                            merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after]).sum(0)/layer_attns[i:i+n_to_exclude_after].sum()
-                            reduced_hiddens.append(merged)
-
-                        assert ( ts() == prev-what_red_should_be)
-                        prev = ts()
-                    else:
-                        if n_to_exclude_after>0:
-                            n_to_exclude_after -= 1
-                        else:
-                            reduced_hiddens.append(hs)
-                    #if any(reduced_hiddens[-1].isnan().any()):
-
-                reduced_hiddens.append(unbatched_hidden_states_nop[-1]) # add eos
-                unbatched_hidden_states_nop = torch.stack(reduced_hiddens)
+                unbatched_hidden_states_nop = self.reduce_using_trees(unbatched_hidden_states_nop, layer_attns, trees, n_to_drop, running_span_sizes)
             else:
                 assert not self.contracting
 
@@ -166,6 +106,78 @@ class SyntacticPoolingEncoder(BartEncoder):
         embed_pos = self.embed_positions(final_hidden_states[:,-1])
         final_hidden_states = final_hidden_states + embed_pos
         return BaseModelOutput(last_hidden_state=final_hidden_states)
+
+    def reduce_using_trees(self, unbatched_hidden_states_nop, layer_attns, trees, n_to_drop, running_span_sizes):
+        attn_chunks = [layer_attns[running_span_sizes[i]:running_span_sizes[i+1]] for i in range(len(trees))]
+        options = []
+        tok_idx = 0
+        for i, (t,ac) in enumerate(zip(trees, attn_chunks)):
+            assert ( t.span_size == ac.shape[0])
+            new_drop_options, new_merge_options = t.determine_drops_and_merges(ac)
+            options += [(tok_idx+d.offset, 'drop', d, dcost, i) for d,dcost in new_drop_options]
+            if not self.disallow_drops:
+                options += [(tok_idx+m.offset, 'merge', m, mcost, i) for m,mcost in new_merge_options]
+            tok_idx += t.span_size
+
+        assert self.disallow_drops or (set([x[2].span_size for x in options if x[1]=='drop']) == set([1]))
+        reductions = sorted(options, key=lambda x:x[3])[:n_to_drop]
+        reductions = sorted(reductions, key=lambda x:x[0])
+        reduction_idxs = [x[0] for x in reductions]
+        reduced_hiddens = [unbatched_hidden_states_nop[0]] # start with just bos, will add others in for loop
+        hidden_states_nop_inner = unbatched_hidden_states_nop[1:-1] # drop bos/eos
+        n_to_exclude_after = 0
+        option_idx = 0
+        ts = lambda: sum(t.span_size for t in trees)
+        prev = ts()
+        assert prev==running_span_sizes[-1]
+        prev_tok_idx = -1
+        for i, hs in enumerate(hidden_states_nop_inner):
+            if i in reduction_idxs:
+                tok_idx, red_type, node, _, tidx = reductions[option_idx]
+                #print(f'tok idx: {tok_idx}\ttree idx: {tidx}\toption idx: {option_idx}')
+                while option_idx<len(reductions) and reduction_idxs[option_idx]==i:
+                    option_idx+=1
+                assert prev_tok_idx!=tok_idx
+                prev_tok_idx = tok_idx
+                if n_to_exclude_after>0:
+                    n_to_exclude_after -= 1
+                    continue
+                assert ( node in trees[tidx].descendents)
+                assert tok_idx==i
+                if red_type == 'drop':
+                    what_red_should_be = 1
+                    if node.is_root:
+                        assert trees[tidx].root==node
+                        trees[tidx].root = 'DROPPED'
+                    elif len(node.parent.children)==2: # replace the parent with the sibling
+                        sibling = [n for n in node.parent.children if n!=node][0]
+                        assert node.parent.is_root
+                        assert ( node.parent==trees[tidx].root)
+                        trees[tidx].root = sibling
+                        sibling.parent = trees[tidx]
+                        assert sibling.is_root
+                    else:
+                        node.drop_non_root()
+
+                else:
+                    n_to_exclude_after = node.span_size-1
+                    what_red_should_be = n_to_exclude_after
+
+                    node.merge()
+                    merged = (layer_attns[i:i+n_to_exclude_after].unsqueeze(1)*hidden_states_nop_inner[i:i+n_to_exclude_after]).sum(0)/layer_attns[i:i+n_to_exclude_after].sum()
+                    reduced_hiddens.append(merged)
+
+                assert ( ts() == prev-what_red_should_be)
+                prev = ts()
+            else:
+                if n_to_exclude_after>0:
+                    n_to_exclude_after -= 1
+                else:
+                    reduced_hiddens.append(hs)
+            #if any(reduced_hiddens[-1].isnan().any()):
+
+        reduced_hiddens.append(unbatched_hidden_states_nop[-1]) # add eos
+        return torch.stack(reduced_hiddens)
 
 class RootParseNode():
     def __init__(self, sent, word_toks):
