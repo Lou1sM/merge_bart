@@ -36,9 +36,10 @@ parser.add_argument('--run-checks', action='store_true')
 parser.add_argument('--truncate-inputs', action='store_true')
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
+parser.add_argument('--expdir-prefix', type=str, default='.')
 ARGS = parser.parse_args()
 
-set_experiment_dir(expdir:=join('experiments',ARGS.expname), overwrite=ARGS.overwrite, name_of_trials='experiments/tmp')
+set_experiment_dir(expdir:=join(ARGS.expdir_prefix, 'experiments',ARGS.expname), overwrite=ARGS.overwrite, name_of_trials=join(ARGS.expdir_prefix,'experiments/tmp'))
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'

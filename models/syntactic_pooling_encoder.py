@@ -6,9 +6,6 @@ import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
-import nltk
-#import re
-nltk.download('punkt')
 
 
 
