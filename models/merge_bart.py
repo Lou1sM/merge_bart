@@ -16,7 +16,7 @@ class MergeBart(BartForConditionalGeneration):
         self.load_state_dict(loaded_state_dict)
         self.loss_fct = CrossEntropyLoss(reduction='none')
 
-    def forward(self, input_ids, labels, attn_mask, loss_mask, trees=None):
+    def forward(self, input_ids, attn_mask, labels, loss_mask, trees=None):
         encoder_outputs = self.model.encoder(input_ids, attn_mask, trees=trees)
         loss = 0
         labs = labels[:,:self.tokenizer.model_max_length+1]

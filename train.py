@@ -14,6 +14,8 @@ from models.merge_bart import MergeBart
 from utils import rouge_from_multiple_refs, display_rouges, TreeError
 import argparse
 import string
+import nltk
+nltk.download('punkt')
 from os.path import join
 
 
@@ -29,7 +31,9 @@ parser.add_argument('--start-from', type=int, default=1)
 parser.add_argument('--verbose-enc', action='store_true')
 parser.add_argument('--overwrite', action='store_true')
 parser.add_argument('--use-trees', action='store_true')
+parser.add_argument('--is-test','-t', action='store_true')
 parser.add_argument('--run-checks', action='store_true')
+parser.add_argument('--truncate-inputs', action='store_true')
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
 ARGS = parser.parse_args()
@@ -108,6 +112,7 @@ def epname_from_dpoint(x):
     return ''.join(w[0].lower() for w in dpoint['Show Title'].split())+'-'+dpoint['Episode Number']
 
 dsets = {}
+check_dir('datasets')
 for split in ('train','validation', 'test'):
     cachepath = 'datasets/trainset-tokenized' if split=='train' else f'datasets/{split}set'
     if ARGS.recompute_dset or not os.path.exists(cachepath):
@@ -115,7 +120,7 @@ for split in ('train','validation', 'test'):
             raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
         dsets[split] = raw_dset[split]
         if split=='train':
-            dsets[split] = raw_dset['test'].map(hf_preproc, batched=True).remove_columns(raw_dset[split].features)
+            dsets[split] = raw_dset[split].map(hf_preproc, batched=True).remove_columns(raw_dset[split].features)
         dsets[split].save_to_disk(cachepath)
     else:
         print(f'Loading {split}set')
@@ -132,13 +137,17 @@ for epoch in range(ARGS.n_epochs):
     for i, (input_ids, attn_mask, labels, loss_mask) in enumerate(pbar:=tqdm(trainloader)):
         if i<ARGS.start_from:
             continue
-        loss = mb(input_ids[:,:1250], attn_mask=attn_mask[:,:1250], labels=labels, loss_mask=loss_mask)
+        if ARGS.truncate_inputs:
+            input_ids = input_ids[:,:1250]
+            attn_mask=attn_mask[:,:1250]
+        loss = mb(input_ids=input_ids, attn_mask=attn_mask, labels=labels, loss_mask=loss_mask)
         loss.backward()
         opt.step()
         opt.zero_grad()
         epoch_loss = (i*epoch_loss + loss.item())/(i+1)
         pbar.set_description(f'loss: {loss.item():.4f} epoch loss: {epoch_loss:.4f}')
-        break
+        if ARGS.is_test and i==3:
+            break
 
     torch.save(mb.state_dict(), join(chkpt_dir, 'latest.pt'))
 
@@ -161,4 +170,5 @@ with torch.no_grad():
         rs = rouge_from_multiple_refs(text_pred, dpoint['Recap'], False, False)
         for n,val in display_rouges(rs):
             print(f'{n}: {val}')
-        break
+        if ARGS.is_test and i==3:
+            break
