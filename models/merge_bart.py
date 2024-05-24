@@ -9,7 +9,7 @@ from torch.nn import CrossEntropyLoss
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, encoder_type, load_from, n_contract=1000, disallow_drops=False, verbose=False):
+    def __init__(self, encoder_type, load_from, n_contract=1000, disallow_drops=False, verbose=False, run_checks=False):
         cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
         #if load_from=='lucadiello/bart-small':
@@ -21,7 +21,7 @@ class MergeBart(BartForConditionalGeneration):
         #default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
         super().__init__(cfg)
         if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose)
+            self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose, run_checks)
         elif encoder_type == 'pool':
             self.model.encoder = PoolingEncoder()
         self.load_state_dict(loaded_state_dict)

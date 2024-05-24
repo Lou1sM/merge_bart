@@ -27,6 +27,7 @@ parser.add_argument('--start-from', type=int, default=1)
 parser.add_argument('--verbose-enc', action='store_true')
 parser.add_argument('--overwrite', action='store_true')
 parser.add_argument('--no-trees', action='store_true')
+parser.add_argument('--run-checks', action='store_true')
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
 ARGS = parser.parse_args()
@@ -35,7 +36,7 @@ set_experiment_dir(expdir:=join('experiments',ARGS.expname), overwrite=ARGS.over
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
-mb = MergeBart('syn-pool', chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc)
+mb = MergeBart('syn-pool', chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
     mb.load_state_dict(torch.load(join('experiments', ARGS.reload_from, 'checkpoints','latest.pt')))
 failed = 0
