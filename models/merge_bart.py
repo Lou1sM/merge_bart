@@ -27,23 +27,23 @@ class MergeBart(BartForConditionalGeneration):
         self.load_state_dict(loaded_state_dict)
         self.loss_fct = CrossEntropyLoss()
 
-    def forward(self, input_ids, trees, labelss):
-        encoder_outputs = self.model.encoder(input_ids, trees)
+    def forward(self, input_ids, trees, labels, attn_mask):
+        encoder_outputs = self.model.encoder(input_ids, trees, attn_mask)
         loss = 0
-        for labs in labelss:
-            labs = labs[:,:self.tokenizer.model_max_length+1]
-            decoder_input_ids = labs[:,:-1]
-            labs = labs[:,1:]
-            decoder_outputs = self.model.decoder(
-                input_ids=decoder_input_ids,
-                encoder_hidden_states=encoder_outputs[0],
-            )
+        #for labs in labelss:
+        labs = labels[:,:self.tokenizer.model_max_length+1]
+        decoder_input_ids = labs[:,:-1]
+        labs = labs[:,1:]
+        decoder_outputs = self.model.decoder(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_outputs[0],
+        )
 
-            lm_logits = self.lm_head(decoder_outputs[0])
-            lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
+        lm_logits = self.lm_head(decoder_outputs[0])
+        lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
-            labs = labs.to(lm_logits.device)
-            loss += self.loss_fct(lm_logits.view(-1, self.config.vocab_size), labs.view(-1))
+        labs = labs.to(lm_logits.device)
+        loss += self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), labs.reshape(-1))
 
         #return Seq2SeqLMOutput(loss=masked_lm_loss,logits=lm_logits)
         return loss

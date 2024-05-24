@@ -115,7 +115,13 @@ for epoch in range(ARGS.n_epochs):
         labelss = [torch.tensor(mb.tokenizer(g).input_ids).cuda().unsqueeze(0) for g in gt_summs]
         copied_trees = trees if ARGS.no_trees else [deepcopy(t) for t in trees]
         # train together on all labels for the same input to minimize encoder fwds
-        loss = mb(token_ids, trees=copied_trees, labelss=labelss)
+        dummy_token_ids = token_ids[:7500].tile((2,1))
+        dummy_attn_mask = torch.ones_like(dummy_token_ids)
+        #dummy_attn_mask[1,-10:] = 0
+        dummy_labels = labelss[0][:500].tile((2,1))
+        #token_ids = token_ids[:,:1500]
+        #dummy_attn_mask = dummy_attn_mask[:,:1500]
+        loss = mb(dummy_token_ids, trees=copied_trees, labels=dummy_labels, attn_mask=dummy_attn_mask)
         loss.backward()
         #befores = [p.detach().cpu().clone() for p in mb.model.parameters()]
         opt.step()
