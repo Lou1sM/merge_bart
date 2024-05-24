@@ -1,39 +1,30 @@
 from transformers import BartForConditionalGeneration, BartConfig
 from transformers.models.auto.configuration_auto import AutoConfig
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from transformers.modeling_outputs import Seq2SeqLMOutput
-from .pooling_encoder import PoolingEncoder
 from .syntactic_pooling_encoder import SyntacticPoolingEncoder
 import torch
 from torch.nn import CrossEntropyLoss
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, encoder_type, load_from, n_contract=1000, disallow_drops=False, verbose=False, run_checks=False):
+    def __init__(self, load_from, n_contract=1000, disallow_drops=False, verbose=False, run_checks=False):
         cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
-        #if load_from=='lucadiello/bart-small':
-        #    default_bart_config.max_position_embeddings = 512
-        #    default_bart_config.hidden_size = 512
-        #    default_bart_config.attention_heads = 8
-        #    default_bart_config.encoder_ffn_dim = 2048
         loaded_state_dict = AutoModelForSeq2SeqLM.from_pretrained(load_from).state_dict()
-        #default_bart_config.vocab_size = loaded_state_dict['lm_head.weight'].shape[0]
         super().__init__(cfg)
-        if encoder_type == 'syn-pool':
-            self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose, run_checks)
-        elif encoder_type == 'pool':
-            self.model.encoder = PoolingEncoder()
+        self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose, run_checks)
         self.load_state_dict(loaded_state_dict)
-        self.loss_fct = CrossEntropyLoss()
+        self.loss_fct = CrossEntropyLoss(reduction='none')
 
-    def forward(self, input_ids, trees, labels, attn_mask):
-        encoder_outputs = self.model.encoder(input_ids, trees, attn_mask)
+    def forward(self, input_ids, labels, attn_mask, loss_mask, trees=None):
+        encoder_outputs = self.model.encoder(input_ids, attn_mask, trees=trees)
         loss = 0
-        #for labs in labelss:
         labs = labels[:,:self.tokenizer.model_max_length+1]
+        # if e.g. context-size==512, then the 512th prediction will predict the
+        # 513th token, don't mask this, so need up to 513 tokens but only 512 of mask
         decoder_input_ids = labs[:,:-1]
-        labs = labs[:,1:]
+        loss_mask = loss_mask[:,:decoder_input_ids.shape[1]]
+        targets = labs[:,1:]
         decoder_outputs = self.model.decoder(
             input_ids=decoder_input_ids,
             encoder_hidden_states=encoder_outputs[0],
@@ -42,16 +33,15 @@ class MergeBart(BartForConditionalGeneration):
         lm_logits = self.lm_head(decoder_outputs[0])
         lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
-        labs = labs.to(lm_logits.device)
-        loss += self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), labs.reshape(-1))
+        per_tok_loss = self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), targets.flatten())
+        loss = (loss_mask.flatten()*per_tok_loss).mean()
 
-        #return Seq2SeqLMOutput(loss=masked_lm_loss,logits=lm_logits)
         return loss
 
 
-    def generate(self, input_ids, trees, min_len=-1, max_len=-1):
+    def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1):
         max_len = max(max_len, min_len)
-        encoder_outputs = self.model.encoder(input_ids, trees)
+        encoder_outputs = self.model.encoder(input_ids, attn_mask, trees)
         past_key_values = None
         genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id).cuda()]
         while True:

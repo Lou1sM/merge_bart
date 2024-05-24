@@ -42,7 +42,7 @@ class SyntacticPoolingEncoder(BartEncoder):
             self.hiddens_nop = x#.unsqueeze(0)
             self.padding_needed = 0
 
-    def forward(self, input_ids, trees, attn_mask, **kwargs):
+    def forward(self, input_ids, attn_mask, trees, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
         self.bs = inputs_embeds.shape[0]
         self.orig_attn_mask = attn_mask
