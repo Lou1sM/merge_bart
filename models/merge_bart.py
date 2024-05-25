@@ -16,14 +16,13 @@ class MergeBart(BartForConditionalGeneration):
         self.load_state_dict(loaded_state_dict)
         self.loss_fct = CrossEntropyLoss(reduction='none')
 
-    def forward(self, input_ids, attn_mask, labels, loss_mask, trees=None):
-        encoder_outputs = self.model.encoder(input_ids, attn_mask, trees=trees)
-        loss = 0
+    def forward(self, input_ids, attn_mask, labels, loss_mask=None, trees=None, encoder_outputs=None):
+        if encoder_outputs is None:
+            encoder_outputs = self.model.encoder(input_ids, attn_mask, trees=trees)
         labs = labels[:,:self.tokenizer.model_max_length+1]
         # if e.g. context-size==512, then the 512th prediction will predict the
         # 513th token, don't mask this, so need up to 513 tokens but only 512 of mask
         decoder_input_ids = labs[:,:-1]
-        loss_mask = loss_mask[:,:decoder_input_ids.shape[1]]
         targets = labs[:,1:]
         decoder_outputs = self.model.decoder(
             input_ids=decoder_input_ids,
@@ -34,17 +33,19 @@ class MergeBart(BartForConditionalGeneration):
         lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
 
         per_tok_loss = self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), targets.flatten())
-        loss = (loss_mask.flatten()*per_tok_loss).mean()
+        if loss_mask is not None:
+            loss_mask = loss_mask[:,:decoder_input_ids.shape[1]]
+            per_tok_loss = (loss_mask.flatten()*per_tok_loss)
 
-        return loss
+        return per_tok_loss.mean()
 
 
-    def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1):
+    def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1, labels=None):
         max_len = max(max_len, min_len)
         encoder_outputs = self.model.encoder(input_ids, attn_mask, trees)
         past_key_values = None
         genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id).cuda()]
-        while True:
+        for i in range(max_len+1): # +1 for bos-tok
             decoder_outputs = self.model.decoder(
                 input_ids=last_genned[None,None], # make have shape (1,1)
                 encoder_hidden_states=encoder_outputs[0],
@@ -58,7 +59,6 @@ class MergeBart(BartForConditionalGeneration):
             past_key_values = decoder_outputs.past_key_values
             last_genned = lm_logits.argmax()
             genned_ids.append(last_genned)
-            if len(genned_ids)==max_len+1: break # +1 for bos-tok
             if last_genned==self.tokenizer.eos_token_id and len(genned_ids)>min_len: break
 
-        return torch.stack(genned_ids)
+        return torch.stack(genned_ids), encoder_outputs

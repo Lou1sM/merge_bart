@@ -139,14 +139,18 @@ def run_inference(dset, dname, ndpoints=None):
     with torch.no_grad():
         #mb.eval()
         avg_rouges = np.zeros(4)
+        avg_perp = 0
         check_dir(gendir:=join(expdir, f'{dname}_gens'))
         for i, dpoint in enumerate(pbar:=tqdm(dset)):
             #copied_trees = [deepcopy(t) for t in trees] if ARGS.use_trees else None
             nl_input = '\n'.join(dpoint['Transcript'])
             tokked = mb.tokenizer(nl_input)
+            tokked_labels = torch.tensor([mb.tokenizer('\n'.join(dpoint['Recap'])).input_ids]).cuda()
             input_ids = torch.tensor([tokked.input_ids]).cuda()
             attn_mask = torch.tensor([tokked.attention_mask]).cuda()
-            genned = mb.generate(input_ids, attn_mask, min_len=100)
+            genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100, labels=tokked_labels)
+            perp = mb(input_ids=input_ids, attn_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
+            avg_perp = ((avg_perp*i)+perp) / (i+1)
             text_pred = mb.tokenizer.decode(genned)
             print(text_pred)
             epname = epname_from_dpoint(dpoint)
@@ -154,19 +158,17 @@ def run_inference(dset, dname, ndpoints=None):
                 f.write(text_pred)
             rs = rouge_from_multiple_refs(text_pred, dpoint['Recap'], False, False)
             avg_rouges = ((avg_rouges*i)+rs) / (i+1)
-            pbar.set_description(f'r1: {avg_rouges[0]:.4f}\tr2: {avg_rouges[1]:.4f}\trl: {avg_rouges[2]:.4f}\trlsum: {avg_rouges[3]:.4f}')
-            for n,val in display_rouges(rs):
-                print(f'{n}: {val}')
+            pbar.set_description(f'r1: {avg_rouges[0]:.4f}\tr2: {avg_rouges[1]:.4f}\trl: {avg_rouges[2]:.4f}\trlsum: {avg_rouges[3]:.4f}\tperplexity: {perp:.4f}')
+            #for n,val in display_rouges(rs):
+                #print(f'{n}: {val}')
             if ARGS.is_test and i==3:
                 break
             if ndpoints is not None and (i == ndpoints):
                 break
-        print('Avg ROUGE scores:')
-        for n,val in display_rouges(avg_rouges):
-            print(f'{n}: {val}')
-    return avg_rouges
+    return avg_rouges, avg_perp
 
 bestr2 = 0
+best_perp = np.inf
 patience = 0
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}')
@@ -183,18 +185,25 @@ for epoch in range(ARGS.n_epochs):
         opt.zero_grad()
         epoch_loss = (i*epoch_loss + loss.item())/(i+1)
         pbar.set_description(f'loss: {loss.item():.4f} epoch loss: {epoch_loss:.4f}')
-        if ARGS.is_test and i==3:
+        if ARGS.is_test and i==1:
             break
 
-    avg_rouges = run_inference(dsets['validation'], 'val', 100)
-    if avg_rouges[1] > bestr2:
-        print(f'rouge 2 improved from {bestr2:.5f} to {avg_rouges[1]:.5f}, resetting patience to 0')
+    new_rouges, new_perp = run_inference(dsets['validation'], 'val', 100)
+    if new_rouges[1] > bestr2:
+        print(f'rouge 2 improved from {bestr2:.5f} to {new_rouges[1]:.5f}, resetting patience to 0')
+        bestr2 = new_rouges[1]
         patience = 0
-        bestr2 = avg_rouges[1]
+        torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
+    elif new_perp < best_perp:
+        print(f'perplexity improved from {best_perp:.5f} to {new_perp:.5f}, resetting patience to 0')
+        best_perp = new_perp
+        patience = 0
         torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
     else:
         patience += 1
-        print(f'rouge 2 of {avg_rouges[1]:.5f} is unimproved from best of {bestr2:.5f}, incrementing patience to {patience}')
+        print(f'r2 of {new_rouges[1]:.5f} unimproved from best of {bestr2:.5f}')
+        print(f'perplexity of {new_perp:.5f} unimproved from {best_perp:.4f}')
+        print(f'incrementing patience to {patience}')
     if patience == 5:
         print('patience has reached tolerance of 5, stopping training')
         break
