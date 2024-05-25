@@ -1,4 +1,5 @@
 import stanza
+import numpy as np
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from dl_utils.misc import check_dir, set_experiment_dir
@@ -45,7 +46,7 @@ torch.manual_seed(0)
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
 mb = MergeBart(chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
-    mb.load_state_dict(torch.load(join('experiments', ARGS.reload_from, 'checkpoints','latest.pt')))
+    mb.load_state_dict(torch.load(join('experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0
 
 def preproc(input_text):
@@ -110,7 +111,7 @@ def collate_and_pad(batch):
     return padded_input_ids, attn_mask, padded_labels, loss_mask
 
 def epname_from_dpoint(x):
-    return ''.join(w[0].lower() for w in dpoint['Show Title'].split())+'-'+dpoint['Episode Number']
+    return ''.join(w[0].lower() for w in x['Show Title'].split())+'-'+x['Episode Number']
 
 dsets = {}
 check_dir('datasets')
@@ -132,6 +133,41 @@ mb.cuda()
 opt = AdamW(mb.parameters(), lr=1e-6)
 epoch_loss = 0
 check_dir(chkpt_dir:=join(expdir, 'checkpoints'))
+
+def run_inference(dset, dname, ndpoints=None):
+    print(f'running inference on {dname} up to {ndpoints} dpoints')
+    with torch.no_grad():
+        #mb.eval()
+        avg_rouges = np.zeros(4)
+        check_dir(gendir:=join(expdir, f'{dname}_gens'))
+        for i, dpoint in enumerate(pbar:=tqdm(dset)):
+            #copied_trees = [deepcopy(t) for t in trees] if ARGS.use_trees else None
+            nl_input = '\n'.join(dpoint['Transcript'])
+            tokked = mb.tokenizer(nl_input)
+            input_ids = torch.tensor([tokked.input_ids]).cuda()
+            attn_mask = torch.tensor([tokked.attention_mask]).cuda()
+            genned = mb.generate(input_ids, attn_mask, min_len=100)
+            text_pred = mb.tokenizer.decode(genned)
+            print(text_pred)
+            epname = epname_from_dpoint(dpoint)
+            with open(join(gendir, f'{epname}.txt'), 'w') as f:
+                f.write(text_pred)
+            rs = rouge_from_multiple_refs(text_pred, dpoint['Recap'], False, False)
+            avg_rouges = ((avg_rouges*i)+rs) / (i+1)
+            pbar.set_description(f'r1: {avg_rouges[0]:.4f}\tr2: {avg_rouges[1]:.4f}\trl: {avg_rouges[2]:.4f}\trlsum: {avg_rouges[3]:.4f}')
+            for n,val in display_rouges(rs):
+                print(f'{n}: {val}')
+            if ARGS.is_test and i==3:
+                break
+            if ndpoints is not None and (i == ndpoints):
+                break
+        print('Avg ROUGE scores:')
+        for n,val in display_rouges(avg_rouges):
+            print(f'{n}: {val}')
+    return avg_rouges
+
+bestr2 = 0
+patience = 0
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}')
     mb.train()
@@ -150,26 +186,19 @@ for epoch in range(ARGS.n_epochs):
         if ARGS.is_test and i==3:
             break
 
-    torch.save(mb.state_dict(), join(chkpt_dir, 'latest.pt'))
+    avg_rouges = run_inference(dsets['validation'], 'val', 100)
+    if avg_rouges[1] > bestr2:
+        print(f'rouge 2 improved from {bestr2:.5f} to {avg_rouges[1]:.5f}, resetting patience to 0')
+        patience = 0
+        bestr2 = avg_rouges[1]
+        torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
+    else:
+        patience += 1
+        print(f'rouge 2 of {avg_rouges[1]:.5f} is unimproved from best of {bestr2:.5f}, incrementing patience to {patience}')
+    if patience == 5:
+        print('patience has reached tolerance of 5, stopping training')
+        break
 
-torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
-check_dir(join(expdir, 'test_gens'))
-with torch.no_grad():
-    #mb.eval()
-    for dpoint in tqdm(dsets['test']):
-        #copied_trees = [deepcopy(t) for t in trees] if ARGS.use_trees else None
-        nl_input = '\n'.join(dpoint['Transcript'])
-        tokked = mb.tokenizer(nl_input)
-        input_ids = torch.tensor([tokked.input_ids]).cuda()
-        attn_mask = torch.tensor([tokked.attention_mask]).cuda()
-        genned = mb.generate(input_ids, attn_mask, min_len=100)
-        text_pred = mb.tokenizer.decode(genned)
-        print(text_pred)
-        epname = epname_from_dpoint(dpoint)
-        with open(join(expdir, 'test_gens', f'{epname}.txt'), 'w') as f:
-            f.write(text_pred)
-        rs = rouge_from_multiple_refs(text_pred, dpoint['Recap'], False, False)
-        for n,val in display_rouges(rs):
-            print(f'{n}: {val}')
-        if ARGS.is_test and i==3:
-            break
+print('reloading from best checkpoint')
+mb.load_state_dict(torch.load(join(chkpt_dir,'best.pt')))
+run_inference(dsets['test'], 'test')
