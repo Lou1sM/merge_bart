@@ -87,6 +87,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                 unchunked_hiddens_nop = self.hiddens_nop#.squeeze(0)
                 assert layer_outputs[1].shape[2] == self.n_toks
 
+            if self.verbose:
+                print(f'layer {idx}: ntoks: {self.n_toks}, drop: {n_to_drop}')
         #final_hiddens = self.hiddens_nop.unsqueeze(0)
         self.batchify(unchunked_hiddens_nop, attn_mask)
         embed_pos = self.embed_positions(self.hiddens_nop)
