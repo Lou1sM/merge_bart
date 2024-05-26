@@ -22,13 +22,11 @@ class MergeBart(BartForConditionalGeneration):
         self.run_checks = run_checks
         self.loss_fct = CrossEntropyLoss(reduction='none')
 
-    #def forward(self, input_ids, labels=None, attention_mask=None, decoder_attention_mask=None, trees=None, encoder_outputs=None, past_key_values=None, use_cache=False, **kwargs):
     def forward(self, input_ids, labels=None, attention_mask=None, decoder_attention_mask=None, trees=None, encoder_outputs=None, past_key_values=None, use_cache=False):
         input_ids is not None or encoder_outputs is not None
 
         if encoder_outputs is None:
             encoder_outputs = self.model.encoder(input_ids, attention_mask, trees=trees)
-        #return super().forward(encoder_outputs=encoder_outputs, decoder_input_ids=decoder_input_ids, labels=labels, attention_mask=dec_attn_mask, **kwargs)
         if labels is not None:
             labs = labels[:,:self.tokenizer.model_max_length+1]
             # if e.g. context-size==512, then the 512th prediction will predict the
@@ -85,7 +83,6 @@ class MergeBart(BartForConditionalGeneration):
             for l in self.model.encoder.layers:
                 l.dropout=orig_dropout
         encoder_outputs = self.model.encoder(input_ids, attn_mask, trees)
-        #self.generate(input_ids=input_ids, encoder_outputs=encoder_outputs, attention_mask=attn_mask, min_length=min_len, max_length=max_len)
         past_key_values = None
         genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id).cuda()]
         for i in range(max_len+1): # +1 for bos-tok

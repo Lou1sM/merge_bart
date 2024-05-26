@@ -39,13 +39,10 @@ class SyntacticPoolingEncoder(BartEncoder):
 
     def forward(self, input_ids, attn_mask, trees, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
-        #print('inputs embeds:', inputs_embeds)
         self.bs = inputs_embeds.shape[0]
 
         unchunked_hiddens_nop = inputs_embeds #'nop' means no pos embeds, for now
-        #print('after layer norm:', unchunked_hiddens_nop)
 
-        #all_hiddens = []
         for idx, encoder_layer in enumerate(self.layers):
             self.batchify(unchunked_hiddens_nop, attn_mask)
             embed_pos = self.embed_positions(self.hiddens_nop)
@@ -53,9 +50,8 @@ class SyntacticPoolingEncoder(BartEncoder):
             if idx==0:
                 hiddens = self.layernorm_embedding(hiddens)
                 hiddens = nn.functional.dropout(hiddens, p=self.dropout, training=self.training)
-            #all_hiddens.append(hiddens)
             attn_mask4d = _prepare_4d_attention_mask_for_sdpa(self.layer_attn_mask, torch.float32)
-            layer_outputs = encoder_layer(hiddens, attention_mask=attn_mask4d, layer_head_mask=None, output_attentions=True, doprint=idx==0)
+            layer_outputs = encoder_layer(hiddens, attention_mask=attn_mask4d, layer_head_mask=None, output_attentions=True)
             self.hiddens_nop = layer_outputs[0] - embed_pos # (bsz, n_heads, seqlen, seqlen)
             unchunked_hiddens_nop = self.hiddens_nop.reshape(self.bs,self.pseudo_bs*self.chunk_size,self.nz)
             if self.padding_needed>0:
@@ -90,10 +86,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                 if self.verbose:
                     print(f'layer {idx}: ntoks: {self.n_toks}, drop: {n_to_drop}')
             elif not self.contracting:
-                #unchunked_hiddens_nop = self.hiddens_nop#.squeeze(0)
                 assert layer_outputs[1].shape[2] == self.n_toks
 
-        #final_hiddens = self.hiddens_nop.unsqueeze(0)
         self.batchify(unchunked_hiddens_nop, attn_mask)
         embed_pos = self.embed_positions(self.hiddens_nop)
         final_hiddens = self.hiddens_nop + embed_pos
