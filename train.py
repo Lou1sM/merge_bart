@@ -10,7 +10,7 @@ from copy import deepcopy
 import re
 import torch
 from torch.optim import AdamW
-from models.syntactic_pooling_encoder import RootParseNode, FlatRootParseNode
+from parse import RootParseNode, FlatRootParseNode
 from models.merge_bart import MergeBart
 from utils import rouge_from_multiple_refs, TreeError
 import argparse
@@ -23,7 +23,7 @@ from os.path import join
 parser = argparse.ArgumentParser()
 parser.add_argument('--small', action='store_true')
 parser.add_argument('--recompute-dset', action='store_true')
-parser.add_argument('--disallow-drops', action='store_true')
+parser.add_argument('--buffer-layers', type=int, default=0)
 parser.add_argument('--n-contract', type=int, default=1000)
 parser.add_argument('--bs', type=int, default=2)
 parser.add_argument('--n-epochs', type=int, default=1)
@@ -34,7 +34,7 @@ parser.add_argument('--overwrite', action='store_true')
 parser.add_argument('--use-trees', action='store_true')
 parser.add_argument('--is-test','-t', action='store_true')
 parser.add_argument('--run-checks', action='store_true')
-parser.add_argument('--truncate-inputs', action='store_true')
+parser.add_argument('--truncate-inputs', type=int, default=-1)
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
 parser.add_argument('--expdir-prefix', type=str, default='.')
@@ -44,7 +44,7 @@ set_experiment_dir(expdir:=join(ARGS.expdir_prefix, 'experiments', ARGS.expname)
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
-mb = MergeBart(chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
+mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
     mb.load_state_dict(torch.load(join(ARGS.expdir_prefix, 'experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0
@@ -162,7 +162,7 @@ def run_inference(dset, dname, ndpoints=None):
             pbar.set_description(f'r1: {avg_rouges[0]:.4f}  r2: {avg_rouges[1]:.4f}  rl: {avg_rouges[2]:.4f}  rlsum: {avg_rouges[3]:.4f}  perplexity: {avg_perp:.4f}')
             #for n,val in display_rouges(rs):
                 #print(f'{n}: {val}')
-            if ARGS.is_test and i==30:
+            if ARGS.is_test and i==3:
                 break
             if ndpoints is not None and (i == ndpoints):
                 break
@@ -177,9 +177,9 @@ for epoch in range(ARGS.n_epochs):
     for i, (input_ids, attn_mask, labels, labels_mask) in enumerate(pbar:=tqdm(trainloader)):
         if i<ARGS.start_from:
             continue
-        if ARGS.truncate_inputs:
-            input_ids = input_ids[:,:1250]
-            attn_mask=attn_mask[:,:1250]
+        if ARGS.truncate_inputs != -1:
+            input_ids = input_ids[:,:ARGS.truncate_inputs]
+            attn_mask=attn_mask[:,:ARGS.truncate_inputs]
         loss = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
         loss.backward()
         opt.step()
@@ -209,6 +209,7 @@ for epoch in range(ARGS.n_epochs):
         print('patience has reached tolerance of 5, stopping training')
         break
 
-print('reloading from best checkpoint')
-mb.load_state_dict(torch.load(join(chkpt_dir,'best.pt')))
+if ARGS.n_epochs != 0:
+    print('reloading from best checkpoint')
+    mb.load_state_dict(torch.load(join(chkpt_dir,'best.pt')))
 run_inference(dsets['test'], 'test')

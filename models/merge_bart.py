@@ -4,16 +4,22 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from .syntactic_pooling_encoder import SyntacticPoolingEncoder
 import torch
 from torch.nn import CrossEntropyLoss
+from copy import deepcopy
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, load_from, n_contract=1000, disallow_drops=False, verbose=False, run_checks=False):
+    def __init__(self, load_from, n_contract=1000, buffer_layers=0, verbose=False, run_checks=False):
         cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
         loaded_state_dict = AutoModelForSeq2SeqLM.from_pretrained(load_from).state_dict()
         super().__init__(cfg)
-        self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, disallow_drops, verbose, run_checks)
+        if run_checks:
+            vanilla_enc = deepcopy(self.model.encoder)
+        self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, buffer_layers, verbose, run_checks)
         self.load_state_dict(loaded_state_dict)
+        if run_checks:
+            self.vanilla_enc = vanilla_enc
+        self.run_checks = run_checks
         self.loss_fct = CrossEntropyLoss(reduction='none')
 
     #def forward(self, input_ids, labels=None, attention_mask=None, decoder_attention_mask=None, trees=None, encoder_outputs=None, past_key_values=None, use_cache=False, **kwargs):
@@ -57,6 +63,27 @@ class MergeBart(BartForConditionalGeneration):
 
     def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1):
         max_len = max(max_len, min_len)
+        if self.run_checks:
+            orig_dropout = self.model.encoder.dropout
+            self.model.encoder.dropout=0
+            for l in self.model.encoder.layers:
+                l.dropout=0
+            self.model.encoder.eval()
+            encoder_outputs = self.model.encoder(input_ids[:,:512], attn_mask[:,:512], trees)
+            self.model.encoder.train()
+            self.vanilla_enc.dropout=0.0
+            for l in self.vanilla_enc.layers:
+                l.dropout=0
+            self.vanilla_enc.load_state_dict(self.model.encoder.state_dict())
+            self.vanilla_enc.eval()
+            out2 = self.vanilla_enc(input_ids[:,:512], attn_mask[:,:512], output_hidden_states=True)
+            if not ( (diff:=(encoder_outputs[0]-out2.last_hidden_state).max()) < 1e-5):
+                print(f'warning, differs by {diff} from vanilla enc hiddens')
+                breakpoint()
+            encoder_outputs = self.model.encoder(input_ids[:,:512], attn_mask[:,:512], trees)
+            self.model.encoder.dropout = orig_dropout
+            for l in self.model.encoder.layers:
+                l.dropout=orig_dropout
         encoder_outputs = self.model.encoder(input_ids, attn_mask, trees)
         #self.generate(input_ids=input_ids, encoder_outputs=encoder_outputs, attention_mask=attn_mask, min_length=min_len, max_length=max_len)
         past_key_values = None
