@@ -16,33 +16,46 @@ class MergeBart(BartForConditionalGeneration):
         self.load_state_dict(loaded_state_dict)
         self.loss_fct = CrossEntropyLoss(reduction='none')
 
-    def forward(self, input_ids, attn_mask, labels, loss_mask=None, trees=None, encoder_outputs=None):
+    #def forward(self, input_ids, labels=None, attention_mask=None, decoder_attention_mask=None, trees=None, encoder_outputs=None, past_key_values=None, use_cache=False, **kwargs):
+    def forward(self, input_ids, labels=None, attention_mask=None, decoder_attention_mask=None, trees=None, encoder_outputs=None, past_key_values=None, use_cache=False):
+        input_ids is not None or encoder_outputs is not None
+
         if encoder_outputs is None:
-            encoder_outputs = self.model.encoder(input_ids, attn_mask, trees=trees)
-        labs = labels[:,:self.tokenizer.model_max_length+1]
-        # if e.g. context-size==512, then the 512th prediction will predict the
-        # 513th token, don't mask this, so need up to 513 tokens but only 512 of mask
-        decoder_input_ids = labs[:,:-1]
-        targets = labs[:,1:]
+            encoder_outputs = self.model.encoder(input_ids, attention_mask, trees=trees)
+        #return super().forward(encoder_outputs=encoder_outputs, decoder_input_ids=decoder_input_ids, labels=labels, attention_mask=dec_attn_mask, **kwargs)
+        if labels is not None:
+            labs = labels[:,:self.tokenizer.model_max_length+1]
+            # if e.g. context-size==512, then the 512th prediction will predict the
+            # 513th token, don't mask this, so need up to 513 tokens but only 512 of mask
+            decoder_input_ids = labs[:,:-1]
+            targets = labs[:,1:]
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = decoder_attention_mask[:,:decoder_input_ids.shape[1]]
+        else:
+            decoder_input_ids = None
         decoder_outputs = self.model.decoder(
             input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
             encoder_hidden_states=encoder_outputs[0],
+            encoder_attention_mask=encoder_outputs[1],
+            past_key_values=past_key_values,
+            use_cache=use_cache,
         )
 
-        lm_logits = self.lm_head(decoder_outputs[0])
-        lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
-
-        per_tok_loss = self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), targets.flatten())
-        if loss_mask is not None:
-            loss_mask = loss_mask[:,:decoder_input_ids.shape[1]]
-            per_tok_loss = (loss_mask.flatten()*per_tok_loss)
-
+        if labels is not None:
+            lm_logits = self.lm_head(decoder_outputs[0])
+            lm_logits = lm_logits + self.final_logits_bias.to(lm_logits.device)
+            per_tok_loss = self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), targets.flatten())
+            if decoder_attention_mask is not None:
+                per_tok_loss = (decoder_attention_mask.flatten()*per_tok_loss)
+        else:
+            per_tok_loss = torch.zeros(1).to(input_ids.device)
         return per_tok_loss.mean()
 
-
-    def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1, labels=None):
+    def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1):
         max_len = max(max_len, min_len)
         encoder_outputs = self.model.encoder(input_ids, attn_mask, trees)
+        #self.generate(input_ids=input_ids, encoder_outputs=encoder_outputs, attention_mask=attn_mask, min_length=min_len, max_length=max_len)
         past_key_values = None
         genned_ids = [last_genned:=torch.tensor(self.tokenizer.bos_token_id).cuda()]
         for i in range(max_len+1): # +1 for bos-tok

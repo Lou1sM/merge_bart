@@ -42,14 +42,13 @@ class SyntacticPoolingEncoder(BartEncoder):
     def forward(self, input_ids, attn_mask, trees, **kwargs):
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
         self.bs = inputs_embeds.shape[0]
-        self.orig_attn_mask = attn_mask
 
         unchunked_hiddens_nop = inputs_embeds #'nop' means no pos embeds, for now
         unchunked_hiddens_nop = self.layernorm_embedding(unchunked_hiddens_nop)
         unchunked_hiddens_nop = nn.functional.dropout(unchunked_hiddens_nop, p=self.dropout, training=self.training)
 
         for idx, encoder_layer in enumerate(self.layers):
-            self.batchify(unchunked_hiddens_nop, self.orig_attn_mask)
+            self.batchify(unchunked_hiddens_nop, attn_mask)
             embed_pos = self.embed_positions(self.hiddens_nop[:,:,-1])
             hiddens = self.hiddens_nop + embed_pos
             attn_mask4d = _prepare_4d_attention_mask_for_sdpa(self.layer_attn_mask, torch.float32)
@@ -79,19 +78,23 @@ class SyntacticPoolingEncoder(BartEncoder):
                 if trees is None:
                     reduction_idxs = (-attns).topk(self.n_toks-2 - n_to_drop).indices
                     unchunked_hiddens_nop = self.idx_inner(unchunked_hiddens_nop, reduction_idxs)
-                    self.orig_attn_mask = self.idx_inner(self.orig_attn_mask, reduction_idxs)
+                    attn_mask = self.idx_inner(attn_mask, reduction_idxs)
                     assert unchunked_hiddens_nop.shape[1] == self.n_toks - n_to_drop
-                    assert self.orig_attn_mask.shape[1] == self.n_toks - n_to_drop
+                    assert attn_mask.shape[1] == self.n_toks - n_to_drop
                 else:
                     unchunked_hiddens_nop = self.reduce_using_trees(unchunked_hiddens_nop, attns, trees, n_to_drop)
             else:
                 unchunked_hiddens_nop = self.hiddens_nop#.squeeze(0)
                 assert layer_outputs[1].shape[2] == self.n_toks
 
-        final_hiddens = self.hiddens_nop.unsqueeze(0)
-        embed_pos = self.embed_positions(final_hiddens[:,-1])
-        final_hiddens = final_hiddens + embed_pos
-        return BaseModelOutput(last_hidden_state=final_hiddens)
+        #final_hiddens = self.hiddens_nop.unsqueeze(0)
+        self.batchify(unchunked_hiddens_nop, attn_mask)
+        embed_pos = self.embed_positions(self.hiddens_nop)
+        final_hiddens = self.hiddens_nop + embed_pos
+        final_hiddens = final_hiddens.reshape(self.bs, self.pseudo_bs*self.chunk_size, self.nz)
+        if self.padding_needed > 0:
+            final_hiddens = final_hiddens[:,:-self.padding_needed]
+        return BaseModelOutput(last_hidden_state=final_hiddens, attentions=attn_mask)
 
     def reduce_using_trees(self, unchunked_hiddens_nop, layer_attns, trees, n_to_drop):
         if trees is not None:

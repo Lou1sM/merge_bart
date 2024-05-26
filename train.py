@@ -40,13 +40,13 @@ parser.add_argument('--reload-from', type=str)
 parser.add_argument('--expdir-prefix', type=str, default='.')
 ARGS = parser.parse_args()
 
-set_experiment_dir(expdir:=join(ARGS.expdir_prefix, 'experiments',ARGS.expname), overwrite=ARGS.overwrite, name_of_trials=join(ARGS.expdir_prefix,'experiments/tmp'))
+set_experiment_dir(expdir:=join(ARGS.expdir_prefix, 'experiments', ARGS.expname), overwrite=ARGS.overwrite, name_of_trials=join(ARGS.expdir_prefix,'experiments/tmp'))
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
 mb = MergeBart(chkpt, disallow_drops=ARGS.disallow_drops, verbose=ARGS.verbose_enc, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
-    mb.load_state_dict(torch.load(join('experiments', ARGS.reload_from, 'checkpoints','best.pt')))
+    mb.load_state_dict(torch.load(join(ARGS.expdir_prefix, 'experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0
 
 def preproc(input_text):
@@ -142,26 +142,27 @@ def run_inference(dset, dname, ndpoints=None):
         avg_perp = 0
         check_dir(gendir:=join(expdir, f'{dname}_gens'))
         for i, dpoint in enumerate(pbar:=tqdm(dset)):
-            #copied_trees = [deepcopy(t) for t in trees] if ARGS.use_trees else None
             nl_input = '\n'.join(dpoint['Transcript'])
             tokked = mb.tokenizer(nl_input)
             tokked_labels = torch.tensor([mb.tokenizer('\n'.join(dpoint['Recap'])).input_ids]).cuda()
             input_ids = torch.tensor([tokked.input_ids]).cuda()
             attn_mask = torch.tensor([tokked.attention_mask]).cuda()
-            genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100, labels=tokked_labels)
-            perp = mb(input_ids=input_ids, attn_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
+            #genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100, labels=tokked_labels)
+            genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100)
+            perp = mb(input_ids=input_ids, attention_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
             avg_perp = ((avg_perp*i)+perp) / (i+1)
             text_pred = mb.tokenizer.decode(genned)
-            print(text_pred)
+            if i%10 == 0:
+                print(text_pred)
             epname = epname_from_dpoint(dpoint)
             with open(join(gendir, f'{epname}.txt'), 'w') as f:
                 f.write(text_pred)
             rs = rouge_from_multiple_refs(text_pred, dpoint['Recap'], False, False)
             avg_rouges = ((avg_rouges*i)+rs) / (i+1)
-            pbar.set_description(f'r1: {avg_rouges[0]:.4f}\tr2: {avg_rouges[1]:.4f}\trl: {avg_rouges[2]:.4f}\trlsum: {avg_rouges[3]:.4f}\tperplexity: {perp:.4f}')
+            pbar.set_description(f'r1: {avg_rouges[0]:.4f}  r2: {avg_rouges[1]:.4f}  rl: {avg_rouges[2]:.4f}  rlsum: {avg_rouges[3]:.4f}  perplexity: {perp:.4f}')
             #for n,val in display_rouges(rs):
                 #print(f'{n}: {val}')
-            if ARGS.is_test and i==3:
+            if ARGS.is_test and i==30:
                 break
             if ndpoints is not None and (i == ndpoints):
                 break
@@ -173,13 +174,13 @@ patience = 0
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}')
     mb.train()
-    for i, (input_ids, attn_mask, labels, loss_mask) in enumerate(pbar:=tqdm(trainloader)):
+    for i, (input_ids, attn_mask, labels, labels_mask) in enumerate(pbar:=tqdm(trainloader)):
         if i<ARGS.start_from:
             continue
         if ARGS.truncate_inputs:
             input_ids = input_ids[:,:1250]
             attn_mask=attn_mask[:,:1250]
-        loss = mb(input_ids=input_ids, attn_mask=attn_mask, labels=labels, loss_mask=loss_mask)
+        loss = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
         loss.backward()
         opt.step()
         opt.zero_grad()
@@ -188,7 +189,7 @@ for epoch in range(ARGS.n_epochs):
         if ARGS.is_test and i==1:
             break
 
-    new_rouges, new_perp = run_inference(dsets['validation'], 'val', 100)
+    new_rouges, new_perp = run_inference(dsets['validation'], 'val', 300)
     if new_rouges[1] > bestr2:
         print(f'rouge 2 improved from {bestr2:.5f} to {new_rouges[1]:.5f}, resetting patience to 0')
         bestr2 = new_rouges[1]
