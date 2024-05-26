@@ -48,9 +48,12 @@ class MergeBart(BartForConditionalGeneration):
             per_tok_loss = self.loss_fct(lm_logits.reshape(-1, self.config.vocab_size), targets.flatten())
             if decoder_attention_mask is not None:
                 per_tok_loss = (decoder_attention_mask.flatten()*per_tok_loss)
+                loss = per_tok_loss.sum()/decoder_attention_mask.sum()
+            else:
+                loss = per_tok_loss.mean()
         else:
-            per_tok_loss = torch.zeros(1).to(input_ids.device)
-        return per_tok_loss.mean()
+            loss = torch.zeros(1).to(input_ids.device)
+        return loss
 
     def generate(self, input_ids, attn_mask, trees=None, min_len=-1, max_len=-1):
         max_len = max(max_len, min_len)

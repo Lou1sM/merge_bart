@@ -122,9 +122,9 @@ def rouge_from_multiple_refs(pred, references, return_full, benchmark_rl):
         if maybe_new_benchmark > benchmark:
             benchmark = maybe_new_benchmark
             best_rouge = new_rouge
-    if benchmark == 0:
-        if not all([gt is None for gt in references]):
-            print('rouge is zero')
+    #if benchmark == 0:
+        #if not all([gt is None for gt in references]):
+            #print('rouge is zero')
     return best_rouge if return_full else extract_main_rouges(best_rouge)
 
 def chunkify(text,max_chunk_size):
