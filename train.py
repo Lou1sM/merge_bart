@@ -190,14 +190,17 @@ for epoch in range(ARGS.n_epochs):
             break
 
     new_rouges, new_perp = run_inference(dsets['validation'], 'val', 300)
+    rimproved, pimproved = False, False
     if new_rouges[1] > bestr2:
-        print(f'rouge 2 improved from {bestr2:.5f} to {new_rouges[1]:.5f}, resetting patience to 0')
+        print(f'rouge 2 improved from {bestr2:.5f} to {new_rouges[1]:.5f}, ', end='')
         bestr2 = new_rouges[1]
-        patience = 0
-        torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
-    elif new_perp < best_perp:
-        print(f'perplexity improved from {best_perp:.5f} to {new_perp:.5f}, resetting patience to 0')
+        rimproved = True
+    if new_perp < best_perp:
+        print(f'perplexity improved from {best_perp:.5f} to {new_perp:.5f}, ', end='')
         best_perp = new_perp
+        pimproved = True
+    if rimproved or pimproved:
+        print('resetting patience to 0')
         patience = 0
         torch.save(mb.state_dict(), join(chkpt_dir, 'best.pt'))
     else:
@@ -205,7 +208,7 @@ for epoch in range(ARGS.n_epochs):
         print(f'r2 of {new_rouges[1]:.5f} unimproved from best of {bestr2:.5f}')
         print(f'perplexity of {new_perp:.5f} unimproved from {best_perp:.4f}')
         print(f'incrementing patience to {patience}')
-    if patience == 5:
+    if patience == 2:
         print('patience has reached tolerance of 5, stopping training')
         break
 
