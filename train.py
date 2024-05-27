@@ -10,6 +10,7 @@ from copy import deepcopy
 import re
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import MultiStepLR
 from parse import RootParseNode, FlatRootParseNode
 from models.merge_bart import MergeBart
 from utils import rouge_from_multiple_refs, TreeError
@@ -28,6 +29,7 @@ parser.add_argument('--n-contract', type=int, default=1000)
 parser.add_argument('--bs', type=int, default=2)
 parser.add_argument('--n-epochs', type=int, default=1)
 parser.add_argument('--start-from', type=int, default=1)
+parser.add_argument('--tol', type=int, default=2)
 parser.add_argument('--lr', type=float, default=1e-6)
 parser.add_argument('--verbose-enc', action='store_true')
 parser.add_argument('--overwrite', action='store_true')
@@ -130,7 +132,11 @@ for split in ('train','validation', 'test'):
 
 trainloader = DataLoader(dsets['train'], batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
 mb.cuda()
-opt = AdamW(mb.parameters(), lr=ARGS.lr)
+#opt = AdamW(mb.parameters(), lr=ARGS.lr)
+enc_pos_embs = [p for x,p in mb.named_parameters() if x=='model.encoder.embed_positions.weight']
+other_params = [p for x,p in mb.named_parameters() if x!='model.encoder.embed_positions.weight']
+opt = AdamW([{'params':other_params, 'lr':ARGS.lr}, {'params':enc_pos_embs, 'lr':ARGS.lr*3}])
+scheduler = MultiStepLR(opt, milestones=[3,6,10,20,35], gamma=0.5)
 epoch_loss = 0
 check_dir(chkpt_dir:=join(expdir, 'checkpoints'))
 
@@ -172,7 +178,7 @@ bestr2 = 0
 best_perp = np.inf
 patience = 0
 for epoch in range(ARGS.n_epochs):
-    print(f'Epoch: {epoch}')
+    print(f'Epoch: {epoch}, learning rate: {scheduler.get_last_lr()}')
     mb.train()
     for i, (input_ids, attn_mask, labels, labels_mask) in enumerate(pbar:=tqdm(trainloader)):
         if i<ARGS.start_from:
@@ -208,9 +214,10 @@ for epoch in range(ARGS.n_epochs):
         print(f'r2 of {new_rouges[1]:.5f} unimproved from best of {bestr2:.5f}')
         print(f'perplexity of {new_perp:.5f} unimproved from {best_perp:.4f}')
         print(f'incrementing patience to {patience}')
-    if patience == 2:
+    if patience == ARGS.tol:
         print('patience has reached tolerance of 5, stopping training')
         break
+    scheduler.step()
 
 if ARGS.n_epochs != 0:
     print('reloading from best checkpoint')
