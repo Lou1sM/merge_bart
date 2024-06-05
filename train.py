@@ -198,12 +198,12 @@ for epoch in range(ARGS.n_epochs):
         if ARGS.truncate_inputs != -1:
             input_ids = input_ids[:,:ARGS.truncate_inputs]
             attn_mask=attn_mask[:,:ARGS.truncate_inputs]
-        loss = mb(input_ids=input_ids, attn_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
-        loss.backward()
+        model_outputs = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
+        model_outputs.loss.backward()
         opt.step()
         opt.zero_grad()
-        epoch_loss = (i*epoch_loss + loss.item())/(i+1)
-        pbar.set_description(f'loss: {loss.item():.4f} epoch loss: {epoch_loss:.4f}')
+        epoch_loss = (i*epoch_loss + model_outputs.loss.item())/(i+1)
+        pbar.set_description(f'loss: {model_outputs.loss.item():.4f} epoch loss: {epoch_loss:.4f}')
         if ARGS.is_test and i==1:
             break
 
