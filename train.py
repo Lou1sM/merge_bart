@@ -39,6 +39,9 @@ parser.add_argument('--is-test','-t', action='store_true')
 parser.add_argument('--run-checks', action='store_true')
 parser.add_argument('--vanilla-model', action='store_true')
 parser.add_argument('--truncate-inputs', type=int, default=-1)
+parser.add_argument('--min-len', type=int, default=100)
+parser.add_argument('--max-len', type=int, default=120)
+parser.add_argument('--n-beams', type=int, default=10)
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
 parser.add_argument('--expdir-prefix', type=str, default='.')
@@ -163,7 +166,7 @@ def run_inference(dset, dname, ndpoints=None):
                 input_ids = input_ids[:,:ARGS.truncate_inputs]
                 attn_mask=attn_mask[:,:ARGS.truncate_inputs]
             #genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100, labels=tokked_labels)
-            genned = mb.generate(input_ids=input_ids, attention_mask=attn_mask, min_length=100, max_length=120)
+            genned = mb.generate(input_ids=input_ids, attention_mask=attn_mask, min_length=ARGS.min_len, max_length=ARGS.max_len, num_beams=ARGS.n_beams)
             #perp = mb(input_ids=input_ids, attn_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
             perp = mb(input_ids=input_ids, attention_mask=attn_mask, labels=tokked_labels).loss
             avg_perp = ((avg_perp*i)+perp) / (i+1)
