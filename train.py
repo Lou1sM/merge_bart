@@ -7,6 +7,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 import os
 from copy import deepcopy
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import re
 import torch
 from torch.optim import AdamW
@@ -36,6 +37,7 @@ parser.add_argument('--overwrite', action='store_true')
 parser.add_argument('--use-trees', action='store_true')
 parser.add_argument('--is-test','-t', action='store_true')
 parser.add_argument('--run-checks', action='store_true')
+parser.add_argument('--vanilla-model', action='store_true')
 parser.add_argument('--truncate-inputs', type=int, default=-1)
 parser.add_argument('--expname', type=str, default='tmp')
 parser.add_argument('--reload-from', type=str)
@@ -46,7 +48,11 @@ set_experiment_dir(expdir:=join(ARGS.expdir_prefix, 'experiments', ARGS.expname)
 torch.manual_seed(0)
 
 chkpt = 'lucadiliello/bart-small' if ARGS.small else 'kabita-choudhary/finetuned-bart-for-conversation-summary'
-mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
+if ARGS.vanilla_model:
+    mb = AutoModelForSeq2SeqLM.from_pretrained(chkpt)
+    mb.tokenizer = AutoTokenizer.from_pretrained(chkpt)
+else:
+    mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
     mb.load_state_dict(torch.load(join(ARGS.expdir_prefix, 'experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0
@@ -153,10 +159,16 @@ def run_inference(dset, dname, ndpoints=None):
             tokked_labels = torch.tensor([mb.tokenizer('\n'.join(dpoint['Recap'])).input_ids]).cuda()
             input_ids = torch.tensor([tokked.input_ids]).cuda()
             attn_mask = torch.tensor([tokked.attention_mask]).cuda()
+            if ARGS.truncate_inputs != -1:
+                input_ids = input_ids[:,:ARGS.truncate_inputs]
+                attn_mask=attn_mask[:,:ARGS.truncate_inputs]
             #genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100, labels=tokked_labels)
-            genned, enc_out = mb.generate(input_ids, attn_mask, min_len=100)
-            perp = mb(input_ids=input_ids, attention_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
+            genned = mb.generate(input_ids=input_ids, attention_mask=attn_mask, min_length=100, max_length=120)
+            #perp = mb(input_ids=input_ids, attn_mask=attn_mask, labels=tokked_labels, encoder_outputs=enc_out)
+            perp = mb(input_ids=input_ids, attention_mask=attn_mask, labels=tokked_labels).loss
             avg_perp = ((avg_perp*i)+perp) / (i+1)
+            assert genned.shape[0] == 1
+            genned = genned.squeeze(0)
             text_pred = mb.tokenizer.decode(genned)
             if i%10 == 0:
                 print(text_pred)
@@ -186,7 +198,7 @@ for epoch in range(ARGS.n_epochs):
         if ARGS.truncate_inputs != -1:
             input_ids = input_ids[:,:ARGS.truncate_inputs]
             attn_mask=attn_mask[:,:ARGS.truncate_inputs]
-        loss = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
+        loss = mb(input_ids=input_ids, attn_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
         loss.backward()
         opt.step()
         opt.zero_grad()

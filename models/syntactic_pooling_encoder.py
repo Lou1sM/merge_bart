@@ -37,7 +37,8 @@ class SyntacticPoolingEncoder(BartEncoder):
             self.hiddens_nop = x#.unsqueeze(0)
             self.padding_needed = 0
 
-    def forward(self, input_ids, attn_mask, trees, **kwargs):
+    def forward(self, input_ids, attention_mask, trees=None, **kwargs):
+        attn_mask = attention_mask # renamed for HF compatibility
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
         self.bs = inputs_embeds.shape[0]
 
@@ -94,8 +95,8 @@ class SyntacticPoolingEncoder(BartEncoder):
         final_hiddens = final_hiddens.reshape(self.bs, self.pseudo_bs*self.chunk_size, self.nz)
         if self.padding_needed > 0:
             final_hiddens = final_hiddens[:,:-self.padding_needed]
-        #return BaseModelOutput(last_hidden_state=final_hiddens, attention_mask=attn_mask, hidden_states=all_hiddens)
-        return final_hiddens, attn_mask#, all_hiddens
+        return BaseModelOutput(last_hidden_state=final_hiddens, attentions=(attn_mask))
+        #return final_hiddens, attn_mask#, all_hiddens
 
     def reduce_using_trees(self, unchunked_hiddens_nop, layer_attns, trees, n_to_drop):
         if trees is not None:
@@ -172,7 +173,8 @@ class SyntacticPoolingEncoder(BartEncoder):
             #if any(reduced_hiddens[-1].isnan().any()):
 
         reduced_hiddens.append(unchunked_hiddens_nop[-1]) # add eos
-        return torch.stack(reduced_hiddens)
+        #return torch.stack(reduced_hiddens)
+        return BaseModelOutput(final_hidden_states=reduced_hiddens)
 
     def idx_inner(self, x, idx):
         inner = x[:,1:-1]
