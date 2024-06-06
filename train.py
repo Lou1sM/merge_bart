@@ -1,6 +1,6 @@
 import stanza
 import numpy as np
-from datasets import load_from_disk
+from datasets import load_from_disk, concatenate_datasets
 from torch.utils.data import DataLoader
 from dl_utils.misc import check_dir, set_experiment_dir
 from datasets import load_dataset
@@ -126,20 +126,26 @@ def epname_from_dpoint(x):
 
 dsets = {}
 check_dir('datasets')
-for split in ('train','validation', 'test'):
+for split in ('train', 'train-fd' ,'validation', 'test'):
     cachepath = 'datasets/trainset-tokenized' if split=='train' else f'datasets/{split}set'
     if ARGS.recompute_dset or not os.path.exists(cachepath):
         if 'raw_dset' not in locals().keys():
             raw_dset = load_dataset("YuanPJ/summ_screen", 'tms')
-        dsets[split] = raw_dset[split]
         if split=='train':
             dsets[split] = raw_dset[split].map(hf_preproc, batched=True).remove_columns(raw_dset[split].features)
+        elif split=='train-fd':
+            fd_dset = load_dataset("YuanPJ/summ_screen", 'fd')
+            conc_fd = concatenate_datasets(fd_dset.values())
+            dsets[split] = conc_fd.map(hf_preproc, batched=True).remove_columns(conc_fd.features)
+        else:
+            dsets[split] = raw_dset[split]
         dsets[split].save_to_disk(cachepath)
     else:
         print(f'Loading {split}set')
         dsets[split] = load_from_disk(cachepath)
 
-trainloader = DataLoader(dsets['train'], batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
+trainloader1 = DataLoader(concatenate_datasets([dsets['train'], dsets['train-fd']]), batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
+trainloader2 = DataLoader(dsets['train'], batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
 mb.cuda()
 #opt = AdamW(mb.parameters(), lr=ARGS.lr)
 enc_pos_embs = [p for x,p in mb.named_parameters() if x=='model.encoder.embed_positions.weight']
@@ -192,9 +198,11 @@ def run_inference(dset, dname, ndpoints=None):
 bestr2 = 0
 best_perp = np.inf
 patience = 0
+breakpoint()
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}, learning rate: {scheduler.get_last_lr()}')
     mb.train()
+    trainloader = trainloader1 if epoch<3 else trainloader2
     for i, (input_ids, attn_mask, labels, labels_mask) in enumerate(pbar:=tqdm(trainloader)):
         if i<ARGS.start_from:
             continue
