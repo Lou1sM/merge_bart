@@ -12,7 +12,7 @@ class SyntacticPoolingEncoder(BartEncoder):
         super().__init__(cfg)
         self.nz = self.config.d_model
         self.context_size = self.config.max_position_embeddings
-        self.n_contract = n_contract
+        self.max_contract = n_contract
         self.buffer_layers = buffer_layers
         self.verbose = verbose
         self.run_checks = run_checks
@@ -40,10 +40,11 @@ class SyntacticPoolingEncoder(BartEncoder):
     def forward(self, input_ids, attention_mask, trees=None, **kwargs):
         attn_mask = attention_mask # renamed for HF compatibility
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
-        self.bs = inputs_embeds.shape[0]
+        self.bs, inp_seq_len = input_ids.shape
 
         unchunked_hiddens_nop = inputs_embeds #'nop' means no pos embeds, for now
 
+        contract_ratio = (self.context_size/inp_seq_len)**(1/len(self.layers))
         for idx, encoder_layer in enumerate(self.layers):
             self.batchify(unchunked_hiddens_nop, attn_mask)
             embed_pos = self.embed_positions(self.hiddens_nop)
@@ -75,7 +76,8 @@ class SyntacticPoolingEncoder(BartEncoder):
                 assert attns.shape[1] == self.n_toks
                 assert unchunked_hiddens_nop.shape[1] == self.n_toks
                 attns = attns[:,1:-1] # cut off bos and eos
-                n_to_drop = min(self.n_contract, self.n_toks-self.context_size+2)
+                n_contract = int(self.n_toks * (1-contract_ratio))
+                n_to_drop = min(n_contract, self.n_toks-self.context_size+2)
                 if trees is None:
                     reduction_idxs = (-attns).topk(self.n_toks-2 - n_to_drop).indices
                     unchunked_hiddens_nop = self.idx_inner(unchunked_hiddens_nop, reduction_idxs)
