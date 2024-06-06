@@ -198,7 +198,6 @@ def run_inference(dset, dname, ndpoints=None):
 bestr2 = 0
 best_perp = np.inf
 patience = 0
-breakpoint()
 for epoch in range(ARGS.n_epochs):
     print(f'Epoch: {epoch}, learning rate: {scheduler.get_last_lr()}')
     mb.train()
@@ -209,12 +208,17 @@ for epoch in range(ARGS.n_epochs):
         if ARGS.truncate_inputs != -1:
             input_ids = input_ids[:,:ARGS.truncate_inputs]
             attn_mask=attn_mask[:,:ARGS.truncate_inputs]
-        model_outputs = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
-        model_outputs.loss.backward()
-        opt.step()
-        opt.zero_grad()
-        epoch_loss = (i*epoch_loss + model_outputs.loss.item())/(i+1)
-        pbar.set_description(f'loss: {model_outputs.loss.item():.4f} epoch loss: {epoch_loss:.4f}')
+        try:
+            model_outputs = mb(input_ids=input_ids, attention_mask=attn_mask, labels=labels, decoder_attention_mask=labels_mask)
+            model_outputs.loss.backward()
+            opt.step()
+            opt.zero_grad()
+            epoch_loss = (i*epoch_loss + model_outputs.loss.item())/(i+1)
+            pbar.set_description(f'loss: {model_outputs.loss.item():.4f} epoch loss: {epoch_loss:.4f}')
+        except torch.cuda.OutOfMemoryError:
+            x=input_ids.shape[1]
+            y=labels.shape[1]
+            print(f'got OOM with inputs {x} and labels {y}')
         if ARGS.is_test and i==1:
             break
 
