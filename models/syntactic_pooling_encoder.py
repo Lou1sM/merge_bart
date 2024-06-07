@@ -8,11 +8,10 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for
 
 
 class SyntacticPoolingEncoder(BartEncoder):
-    def __init__(self, cfg, n_contract, buffer_layers, verbose, run_checks):
+    def __init__(self, cfg, buffer_layers, verbose, run_checks):
         super().__init__(cfg)
         self.nz = self.config.d_model
         self.context_size = self.config.max_position_embeddings
-        self.max_contract = n_contract
         self.buffer_layers = buffer_layers
         self.verbose = verbose
         self.run_checks = run_checks
@@ -42,9 +41,11 @@ class SyntacticPoolingEncoder(BartEncoder):
         inputs_embeds = self.embed_tokens(input_ids)# * self.embed_scale
         self.bs, inp_seq_len = input_ids.shape
 
-        unchunked_hiddens_nop = inputs_embeds #'nop' means no pos embeds, for now
+        unchunked_hiddens_nop = inputs_embeds #'nop' means w/o pos embeds
 
-        contract_ratio = (self.context_size/inp_seq_len)**(1/len(self.layers))
+        n_contract_layers = len(self.layers) - self.buffer_layers
+        desired_output_len = self.context_size-2
+        contract_ratio = (desired_output_len/inp_seq_len)**(1/n_contract_layers)
         for idx, encoder_layer in enumerate(self.layers):
             self.batchify(unchunked_hiddens_nop, attn_mask)
             embed_pos = self.embed_positions(self.hiddens_nop)
@@ -97,6 +98,8 @@ class SyntacticPoolingEncoder(BartEncoder):
         final_hiddens = final_hiddens.reshape(self.bs, self.pseudo_bs*self.chunk_size, self.nz)
         if self.padding_needed > 0:
             final_hiddens = final_hiddens[:,:-self.padding_needed]
+        assert final_hiddens.shape[1] <= self.context_size
+        print(f'final: {final_hiddens.shape[1]}, context size {self.context_size}')
         return BaseModelOutput(last_hidden_state=final_hiddens, attentions=(attn_mask))
         #return final_hiddens, attn_mask#, all_hiddens
 

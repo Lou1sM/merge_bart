@@ -26,7 +26,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--small', action='store_true')
 parser.add_argument('--recompute-dset', action='store_true')
 parser.add_argument('--buffer-layers', type=int, default=0)
-parser.add_argument('--n-contract', type=int, default=1000)
 parser.add_argument('--bs', type=int, default=2)
 parser.add_argument('--n-epochs', type=int, default=1)
 parser.add_argument('--start-from', type=int, default=1)
@@ -38,7 +37,7 @@ parser.add_argument('--use-trees', action='store_true')
 parser.add_argument('--is-test','-t', action='store_true')
 parser.add_argument('--run-checks', action='store_true')
 parser.add_argument('--vanilla-model', action='store_true')
-parser.add_argument('--use-other-dsets', action='store_true')
+parser.add_argument('--extra-train-dsets', type=str, nargs='+', choices=['fd', 'sci'])
 parser.add_argument('--truncate-inputs', type=int, default=-1)
 parser.add_argument('--min-len', type=int, default=100)
 parser.add_argument('--max-len', type=int, default=120)
@@ -56,7 +55,7 @@ if ARGS.vanilla_model:
     mb = AutoModelForSeq2SeqLM.from_pretrained(chkpt)
     mb.tokenizer = AutoTokenizer.from_pretrained(chkpt)
 else:
-    mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
+    mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
     mb.load_state_dict(torch.load(join(ARGS.expdir_prefix, 'experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0
@@ -110,11 +109,9 @@ def script_preproc(inputs):
     return outputs
 
 def article_preproc(inputs):
-    #outputs = mb.tokenizer(['\n'.join(t) for t in inputs['article'] if len(t)<90000])
-    #outputs = mb.tokenizer(['\n'.join(t) for t in inputs['article']])
     outputs = mb.tokenizer(inputs['article'])
     del outputs['attention_mask'] # will be computed dynamically in loader
-    # I'm taking the different list items to be parts of the same summ, not different summs?
+    # I'm assuming the different list items to be parts of the same summ, not different summs, that right?
     outputs['labels'] = mb.tokenizer(['\n'.join(t) for t in inputs['abstract']])['input_ids']
     return outputs
 
@@ -137,14 +134,14 @@ def epname_from_dpoint(x):
 dsets = {}
 check_dir('datasets')
 def prepare_whole_dset_for_train(*dset_name_args, preproc_fn, filter_fn=None):
-    #fd_dset = load_dataset("YuanPJ/summ_screen", 'fd')
     dset = load_dataset(*dset_name_args)
     conc = concatenate_datasets(dset.values())
     if filter_fn is not None:
         conc = conc.filter(filter_fn, with_indices=True)
     return conc.map(preproc_fn, batched=True).remove_columns(conc.features)
 
-split_names = ('train', 'train-fd', 'train-sci', 'validation', 'test') if ARGS.use_other_dsets else ('train', 'validation', 'test')
+split_names = ['train', 'validation', 'test'] + ['train-'+x for x in ARGS.extra_train_dsets]
+#split_names = ('train', 'train-fd', 'train-sci', 'validation', 'test') if ARGS.use_other_dsets else
 for split in split_names:
     cachepath = f'datasets/{split}set-tokenized' if split.startswith('train') else f'datasets/{split}set'
     if ARGS.recompute_dset or not os.path.exists(cachepath):
@@ -153,15 +150,10 @@ for split in split_names:
         if split=='train':
             dsets[split] = raw_dset[split].map(script_preproc, batched=True).remove_columns(raw_dset[split].features)
         elif split=='train-fd':
-            #fd_dset = load_dataset("YuanPJ/summ_screen", 'fd')
-            #conc_fd = concatenate_datasets(fd_dset.values())
             dsets[split] = prepare_whole_dset_for_train('YuanPJ/summ_screen', 'fd', preproc_fn=script_preproc)
         elif split=='train-sci':
-            #fd_dset = load_dataset("YuanPJ/summ_screen", 'fd')
-            #conc_fd = concatenate_datasets(fd_dset.values())
             select_short_inputs = lambda example, idx: len(example['article'])<70000 and idx<8000
             sci_dset = prepare_whole_dset_for_train('armanc/scientific_papers', 'arxiv', preproc_fn=article_preproc, filter_fn=select_short_inputs)
-            #dsets[split] = sci_dset.filter(lambda example: len(example['input_ids'])<30000)
             assert max([len(x) for x in sci_dset['input_ids']]) < 35000
             dsets[split] = sci_dset
         else:
@@ -171,11 +163,9 @@ for split in split_names:
         print(f'Loading {split}set')
         dsets[split] = load_from_disk(cachepath)
 
-#trainloader1 = DataLoader(concatenate_datasets([dsets['train'], dsets['train-fd'], dsets['train-sci']]), batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
 trainloader1 = DataLoader(concatenate_datasets([v for k,v in dsets.items() if k.startswith('train')]), batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
 trainloader2 = DataLoader(dsets['train'], batch_size=ARGS.bs, shuffle=True, collate_fn=collate_and_pad)
 mb.cuda()
-#opt = AdamW(mb.parameters(), lr=ARGS.lr)
 enc_pos_embs = [p for x,p in mb.named_parameters() if x=='model.encoder.embed_positions.weight']
 other_params = [p for x,p in mb.named_parameters() if x!='model.encoder.embed_positions.weight']
 opt = AdamW([{'params':other_params, 'lr':ARGS.lr}, {'params':enc_pos_embs, 'lr':ARGS.lr*3}])

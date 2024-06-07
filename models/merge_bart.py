@@ -9,14 +9,14 @@ from transformers.modeling_outputs import BaseModelOutput, Seq2SeqLMOutput
 
 
 class MergeBart(BartForConditionalGeneration):
-    def __init__(self, load_from, n_contract=1000, buffer_layers=0, verbose=False, run_checks=False):
+    def __init__(self, load_from, buffer_layers=0, verbose=False, run_checks=False):
         cfg = AutoConfig.from_pretrained(load_from)
         self.tokenizer = AutoTokenizer.from_pretrained(load_from)
         loaded_state_dict = AutoModelForSeq2SeqLM.from_pretrained(load_from).state_dict()
         super().__init__(cfg)
         if run_checks:
             vanilla_enc = deepcopy(self.model.encoder)
-        self.model.encoder = SyntacticPoolingEncoder(cfg, n_contract, buffer_layers, verbose, run_checks)
+        self.model.encoder = SyntacticPoolingEncoder(cfg, buffer_layers, verbose, run_checks)
         self.load_state_dict(loaded_state_dict)
         if run_checks:
             self.vanilla_enc = vanilla_enc
