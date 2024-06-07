@@ -29,6 +29,7 @@ parser.add_argument('--buffer-layers', type=int, default=0)
 parser.add_argument('--bs', type=int, default=2)
 parser.add_argument('--n-epochs', type=int, default=1)
 parser.add_argument('--start-from', type=int, default=1)
+parser.add_argument('--n-contract', type=int, default=-1)
 parser.add_argument('--tol', type=int, default=2)
 parser.add_argument('--lr', type=float, default=1e-6)
 parser.add_argument('--verbose-enc', action='store_true')
@@ -55,7 +56,7 @@ if ARGS.vanilla_model:
     mb = AutoModelForSeq2SeqLM.from_pretrained(chkpt)
     mb.tokenizer = AutoTokenizer.from_pretrained(chkpt)
 else:
-    mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, run_checks=ARGS.run_checks)
+    mb = MergeBart(chkpt, buffer_layers=ARGS.buffer_layers, verbose=ARGS.verbose_enc, n_contract=ARGS.n_contract, run_checks=ARGS.run_checks)
 if ARGS.reload_from is not None:
     mb.load_state_dict(torch.load(join(ARGS.expdir_prefix, 'experiments', ARGS.reload_from, 'checkpoints','best.pt')))
 failed = 0

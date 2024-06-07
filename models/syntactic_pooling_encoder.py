@@ -8,12 +8,13 @@ from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for
 
 
 class SyntacticPoolingEncoder(BartEncoder):
-    def __init__(self, cfg, buffer_layers, verbose, run_checks):
+    def __init__(self, cfg, n_contract, buffer_layers, verbose, run_checks):
         super().__init__(cfg)
         self.nz = self.config.d_model
         self.context_size = self.config.max_position_embeddings
         self.buffer_layers = buffer_layers
         self.verbose = verbose
+        self.n_contract = n_contract
         self.run_checks = run_checks
 
     def batchify(self, x, attn_mask):
@@ -77,7 +78,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                 assert attns.shape[1] == self.n_toks
                 assert unchunked_hiddens_nop.shape[1] == self.n_toks
                 attns = attns[:,1:-1] # cut off bos and eos
-                n_contract = int(math.ceil(self.n_toks * (1-contract_ratio)))
+                n_contract = int(math.ceil(self.n_toks * (1-contract_ratio))) if self.n_contract==-1 else self.n_contract
                 n_to_drop = min(n_contract, self.n_toks-self.context_size+2)
                 if trees is None:
                     reduction_idxs = (-attns).topk(self.n_toks-2 - n_to_drop).indices
@@ -100,7 +101,7 @@ class SyntacticPoolingEncoder(BartEncoder):
             final_hiddens = final_hiddens[:,:-self.padding_needed]
         if self.verbose:
             print(f'final: {final_hiddens.shape[1]}, context size {self.context_size}')
-        assert final_hiddens.shape[1] <= self.context_size
+        assert self.n_contract != -1 or final_hiddens.shape[1] <= self.context_size
         return BaseModelOutput(last_hidden_state=final_hiddens, attentions=(attn_mask))
         #return final_hiddens, attn_mask#, all_hiddens
 
