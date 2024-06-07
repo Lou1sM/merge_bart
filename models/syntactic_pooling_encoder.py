@@ -98,8 +98,9 @@ class SyntacticPoolingEncoder(BartEncoder):
         final_hiddens = final_hiddens.reshape(self.bs, self.pseudo_bs*self.chunk_size, self.nz)
         if self.padding_needed > 0:
             final_hiddens = final_hiddens[:,:-self.padding_needed]
+        if self.verbose:
+            print(f'final: {final_hiddens.shape[1]}, context size {self.context_size}')
         assert final_hiddens.shape[1] <= self.context_size
-        print(f'final: {final_hiddens.shape[1]}, context size {self.context_size}')
         return BaseModelOutput(last_hidden_state=final_hiddens, attentions=(attn_mask))
         #return final_hiddens, attn_mask#, all_hiddens
 
