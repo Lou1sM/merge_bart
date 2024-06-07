@@ -77,7 +77,7 @@ class SyntacticPoolingEncoder(BartEncoder):
                 assert attns.shape[1] == self.n_toks
                 assert unchunked_hiddens_nop.shape[1] == self.n_toks
                 attns = attns[:,1:-1] # cut off bos and eos
-                n_contract = int(self.n_toks * (1-contract_ratio))
+                n_contract = int(math.ceil(self.n_toks * (1-contract_ratio)))
                 n_to_drop = min(n_contract, self.n_toks-self.context_size+2)
                 if trees is None:
                     reduction_idxs = (-attns).topk(self.n_toks-2 - n_to_drop).indices
